@@ -93,6 +93,7 @@ const BASIC_LAND_NAME = { W: "Plains", U: "Island", B: "Swamp", R: "Mountain", G
 let selectedCommander = null;
 let currentDeck = null;
 let dragState = null; // { type: 'add', card } | { type: 'remove', group, index }
+let viewMode = "function"; // 'function' | 'type' — how deck-groups are grouped for display
 let searchAbortToken = 0;
 
 const el = (id) => document.getElementById(id);
@@ -516,6 +517,48 @@ function buildBasicLands(identity, sampleCards, count) {
 
 // ---------- Rendering ----------
 
+// Ordered so a card lands in the first bucket that applies — a Creature that's also
+// an Artifact shows under Creatures, matching how most deckbuilding sites group by type.
+const TYPE_CATEGORY_ORDER = [
+  ["Creatures", /Creature/],
+  ["Planeswalkers", /Planeswalker/],
+  ["Battles", /Battle/],
+  ["Instants", /Instant/],
+  ["Sorceries", /Sorcery/],
+  ["Artifacts", /Artifact/],
+  ["Enchantments", /Enchantment/],
+  ["Lands", /Land/],
+];
+function cardTypeCategory(card) {
+  const typeLine = card.type_line || "";
+  for (const [name, pattern] of TYPE_CATEGORY_ORDER) {
+    if (pattern.test(typeLine)) return name;
+  }
+  return "Other";
+}
+
+// Builds the groups actually rendered, without touching deck.groups itself (the real
+// data model add/remove operate on). Each entry keeps a pointer back to its true
+// {group, index} in deck.groups so removal works correctly regardless of display mode.
+function getDisplayGroups(deck, mode) {
+  if (mode === "type") {
+    const buckets = new Map();
+    deck.groups.forEach((group) => {
+      group.cards.forEach((card, index) => {
+        const cat = cardTypeCategory(card);
+        if (!buckets.has(cat)) buckets.set(cat, []);
+        buckets.get(cat).push({ card, qty: card.qty || 1, group, index });
+      });
+    });
+    const order = [...TYPE_CATEGORY_ORDER.map((t) => t[0]), "Other"];
+    return order.filter((name) => buckets.has(name)).map((name) => ({ name, entries: buckets.get(name) }));
+  }
+  return deck.groups.map((group) => ({
+    name: group.name,
+    entries: group.cards.map((card, index) => ({ card, qty: card.qty || 1, group, index })),
+  }));
+}
+
 function renderDeck(deck) {
   const totalCards = 1 + deck.groups.reduce((sum, g) => sum + g.cards.reduce((s, c) => s + (c.qty || 1), 0), 0);
   el("deck-count").textContent = `(${totalCards} cards)`;
@@ -535,17 +578,17 @@ function renderDeck(deck) {
   commanderGroup.appendChild(cGrid);
   groupsEl.appendChild(commanderGroup);
 
-  for (const group of deck.groups) {
-    if (!group.cards.length) continue;
-    const count = group.cards.reduce((s, c) => s + (c.qty || 1), 0);
+  for (const dg of getDisplayGroups(deck, viewMode)) {
+    if (!dg.entries.length) continue;
+    const count = dg.entries.reduce((s, e) => s + e.qty, 0);
     const wrap = document.createElement("div");
     wrap.className = "deck-group";
-    wrap.innerHTML = `<h3><span>${escapeHtml(group.name)}</span><span>${count}</span></h3>`;
+    wrap.innerHTML = `<h3><span>${escapeHtml(dg.name)}</span><span>${count}</span></h3>`;
     const grid = document.createElement("div");
     grid.className = "card-grid";
-    group.cards.forEach((c, idx) => {
-      const tile = cardTile(c, c.qty || 1);
-      makeRemovable(tile, group, idx);
+    dg.entries.forEach((entry) => {
+      const tile = cardTile(entry.card, entry.qty);
+      makeRemovable(tile, entry.group, entry.index);
       grid.appendChild(tile);
     });
     wrap.appendChild(grid);
@@ -849,6 +892,17 @@ deckGroupsEl.addEventListener("drop", (e) => {
     showToast(`Added ${card.name}.`);
     renderDeck(currentDeck);
   }
+});
+
+// ---------- Group-by toggle ----------
+
+document.querySelectorAll("#view-toggle .toggle-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    if (btn.dataset.mode === viewMode) return;
+    viewMode = btn.dataset.mode;
+    document.querySelectorAll("#view-toggle .toggle-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    if (currentDeck) renderDeck(currentDeck);
+  });
 });
 
 el("copy-btn").addEventListener("click", async () => {

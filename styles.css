@@ -265,6 +265,31 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .card-tile.dragging { opacity: 0.35; }
 .card-tile.remove-target { cursor: grab; }
 
+.view-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 22px;
+  font-size: 13px;
+  color: #9aa4b2;
+}
+.toggle-btn {
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  background: transparent;
+  color: #9aa4b2;
+  border: 1px solid #2c3340;
+  border-radius: 20px;
+  cursor: pointer;
+}
+.toggle-btn:hover { border-color: #3a424f; color: #e8ebf0; }
+.toggle-btn.active {
+  background: #d7b56d;
+  color: #14161a;
+  border-color: #d7b56d;
+}
+
 .add-card-panel {
   background: #1a1f27;
   border: 1px solid #2c3340;

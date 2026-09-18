@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Commander Deck Builder</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Commander Deck Builder</h1>
+    <p class="subtitle">Pick a commander, get a prototypical 100-card deck built from live Scryfall data.</p>
+  </header>
+
+  <main>
+    <section class="search-panel" id="search-panel">
+      <label for="commander-input">Search for a commander</label>
+      <div class="search-box">
+        <input type="text" id="commander-input" placeholder="e.g. Atraxa, Praetors' Voice" autocomplete="off" />
+        <div id="search-results" class="search-results hidden"></div>
+      </div>
+    </section>
+
+    <section class="commander-panel hidden" id="commander-panel">
+      <img id="commander-image" alt="Selected commander" />
+      <div class="commander-info">
+        <h2 id="commander-name"></h2>
+        <p id="commander-type"></p>
+        <p id="commander-text"></p>
+        <div id="commander-colors" class="pip-row"></div>
+
+        <div class="archetype-row">
+          <label for="archetype-select">Deck archetype</label>
+          <select id="archetype-select"></select>
+          <p id="archetype-desc" class="archetype-desc"></p>
+        </div>
+
+        <div class="actions">
+          <button id="build-btn">Build Deck</button>
+          <button id="change-btn" class="secondary">Change Commander</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="status-panel" class="status-panel hidden">
+      <div class="spinner"></div>
+      <p id="status-text">Building your deck...</p>
+    </section>
+
+    <section id="deck-panel" class="deck-panel hidden">
+      <div class="deck-header">
+        <div>
+          <h2>Your Deck <span id="deck-count"></span></h2>
+          <p id="deck-archetype-label" class="deck-archetype-label"></p>
+        </div>
+        <div class="deck-actions">
+          <button id="reroll-btn" class="secondary">Rebuild (new picks)</button>
+          <button id="copy-btn" class="secondary">Copy Decklist</button>
+        </div>
+      </div>
+      <div id="curve-chart" class="curve-chart"></div>
+      <div id="deck-groups" class="deck-groups"></div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Card data &amp; images from <a href="https://scryfall.com" target="_blank" rel="noopener">Scryfall</a>. Categories built from community oracle tags + EDHREC popularity rank. Not affiliated with Wizards of the Coast.</p>
+  </footer>
+
+<script src="app.js"></script>
+</body>
+</html>

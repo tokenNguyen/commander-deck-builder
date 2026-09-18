@@ -1016,6 +1016,65 @@ function addCardToDeck(deck, card) {
 }
 
 // Wires a deck-tile for the "drag to the floating Graveyard zone to remove" gesture.
+// Long-press-then-drag for touch screens. HTML5 drag-and-drop (dragstart/dragover/drop,
+// used everywhere above) only fires for mouse input — touch browsers never trigger it —
+// so phones need this separate, pointerType-gated path. It only ever activates for an
+// actual touch pointer, so mouse/trackpad interaction on desktop is completely untouched.
+function attachLongPressDrag(tile, { onStart, onMove, onDrop, onCancel }) {
+  tile.addEventListener("pointerdown", (e) => {
+    if (e.pointerType !== "touch") return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let dragging = false;
+
+    const timer = setTimeout(() => {
+      dragging = true;
+      if (navigator.vibrate) navigator.vibrate(12);
+      onStart(e);
+    }, 350);
+
+    const move = (ev) => {
+      if (!dragging) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) > 10) clearTimeout(timer);
+        return;
+      }
+      ev.preventDefault();
+      onMove(ev);
+    };
+    const finish = (ev, cancelled) => {
+      clearTimeout(timer);
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+      document.removeEventListener("pointercancel", cancelHandler);
+      if (dragging) {
+        if (cancelled) onCancel && onCancel();
+        else onDrop(ev);
+      }
+    };
+    const up = (ev) => finish(ev, false);
+    const cancelHandler = (ev) => finish(ev, true);
+
+    document.addEventListener("pointermove", move, { passive: false });
+    document.addEventListener("pointerup", up);
+    document.addEventListener("pointercancel", cancelHandler);
+  });
+}
+
+function createTouchGhost(tile, e) {
+  const ghost = document.createElement("div");
+  ghost.className = "touch-drag-ghost";
+  const img = tile.querySelector("img");
+  if (img) ghost.appendChild(img.cloneNode(true));
+  document.body.appendChild(ghost);
+  positionTouchGhost(ghost, e);
+  return ghost;
+}
+function positionTouchGhost(ghost, e) {
+  if (!ghost || !e) return;
+  ghost.style.left = e.clientX + "px";
+  ghost.style.top = e.clientY + "px";
+}
+
 function makeRemovable(tile, group, idx) {
   tile.draggable = true;
   tile.classList.add("remove-target");
@@ -1031,6 +1090,42 @@ function makeRemovable(tile, group, idx) {
     tile.classList.remove("dragging");
     dragState = null;
     removeGraveyardZone();
+  });
+
+  let touchGhost = null;
+  const endTouchDrag = () => {
+    tile.classList.remove("dragging");
+    dragState = null;
+    removeGraveyardZone();
+    if (touchGhost) {
+      touchGhost.remove();
+      touchGhost = null;
+    }
+  };
+  attachLongPressDrag(tile, {
+    onStart: (e) => {
+      dragState = { type: "remove", group, index: idx };
+      tile.classList.add("dragging");
+      hidePreview();
+      spawnGraveyardZone(tile);
+      touchGhost = createTouchGhost(tile, e);
+    },
+    onMove: (e) => {
+      positionTouchGhost(touchGhost, e);
+      const over = document.elementFromPoint(e.clientX, e.clientY);
+      if (graveyardEl) graveyardEl.classList.toggle("hover", !!(over && over.closest(".graveyard-zone")));
+    },
+    onDrop: (e) => {
+      const over = document.elementFromPoint(e.clientX, e.clientY);
+      if (over && over.closest(".graveyard-zone")) {
+        const card = group.cards[idx];
+        removeOneCopy(group, idx);
+        showToast(`Removed ${card.name}.`);
+        renderDeck(currentDeck);
+      }
+      endTouchDrag();
+    },
+    onCancel: endTouchDrag,
   });
 }
 
@@ -1131,6 +1226,41 @@ function makeAddable(tile, card) {
   tile.addEventListener("dragend", () => {
     tile.classList.remove("dragging");
     dragState = null;
+  });
+
+  let touchGhost = null;
+  const endTouchDrag = () => {
+    tile.classList.remove("dragging");
+    dragState = null;
+    deckGroupsEl.classList.remove("drop-hover");
+    if (touchGhost) {
+      touchGhost.remove();
+      touchGhost = null;
+    }
+  };
+  attachLongPressDrag(tile, {
+    onStart: (e) => {
+      dragState = { type: "add", card };
+      tile.classList.add("dragging");
+      hidePreview();
+      touchGhost = createTouchGhost(tile, e);
+    },
+    onMove: (e) => {
+      positionTouchGhost(touchGhost, e);
+      const over = document.elementFromPoint(e.clientX, e.clientY);
+      deckGroupsEl.classList.toggle("drop-hover", !!(over && over.closest("#deck-groups")));
+    },
+    onDrop: (e) => {
+      const over = document.elementFromPoint(e.clientX, e.clientY);
+      if (over && over.closest("#deck-groups")) {
+        if (addCardToDeck(currentDeck, card)) {
+          showToast(`Added ${card.name}.`);
+          renderDeck(currentDeck);
+        }
+      }
+      endTouchDrag();
+    },
+    onCancel: endTouchDrag,
   });
 }
 

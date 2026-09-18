@@ -91,6 +91,8 @@ const ARCHETYPES = {
 const BASIC_LAND_NAME = { W: "Plains", U: "Island", B: "Swamp", R: "Mountain", G: "Forest" };
 
 let selectedCommander = null;
+let currentDeck = null;
+let dragState = null; // { type: 'add', card } | { type: 'remove', group, index }
 let searchAbortToken = 0;
 
 const el = (id) => document.getElementById(id);
@@ -417,17 +419,20 @@ async function buildDeck() {
     if (synergy.length) groups.push({ name: `${archetype.label} Synergy`, cards: synergy });
     groups.push(
       { name: "Creatures & Other Spells", cards: fill },
+      { name: "Added Cards", cards: [], isAdded: true },
       { name: "Nonbasic Lands", cards: nonbasicLands },
-      { name: "Basic Lands", cards: basicCards }
+      { name: "Basic Lands", cards: basicCards, isBasics: true }
     );
 
     const deck = {
       commander: selectedCommander,
       archetypeLabel: archetype.label,
       synergyNote,
+      identity,
       groups,
     };
 
+    currentDeck = deck;
     renderDeck(deck);
   } catch (err) {
     el("status-text").textContent = "Something went wrong: " + err.message;
@@ -538,7 +543,11 @@ function renderDeck(deck) {
     wrap.innerHTML = `<h3><span>${escapeHtml(group.name)}</span><span>${count}</span></h3>`;
     const grid = document.createElement("div");
     grid.className = "card-grid";
-    group.cards.forEach((c) => grid.appendChild(cardTile(c, c.qty || 1)));
+    group.cards.forEach((c, idx) => {
+      const tile = cardTile(c, c.qty || 1);
+      makeRemovable(tile, group, idx);
+      grid.appendChild(tile);
+    });
     wrap.appendChild(grid);
     groupsEl.appendChild(wrap);
   }
@@ -546,7 +555,7 @@ function renderDeck(deck) {
   renderCurve(deck);
 
   el("deck-panel").classList.remove("hidden");
-  window._lastDeck = deck; // for copy-to-clipboard
+  currentDeck = deck;
 }
 
 // Renders an actual card image (not a text row) for every card, including basic lands
@@ -642,8 +651,208 @@ function renderCurve(deck) {
   });
 }
 
+// ---------- Drag & drop: add cards from search, remove cards via the Graveyard zone ----------
+
+const BASIC_LAND_NAMES = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"]);
+
+function deckHasCard(deck, name) {
+  const key = normalizeName(name);
+  if (normalizeName(deck.commander.name) === key) return true;
+  return deck.groups.some((g) => !g.isBasics && g.cards.some((c) => normalizeName(c.name) === key));
+}
+
+let toastTimer = null;
+function showToast(message) {
+  let toast = document.querySelector(".toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.className = "toast";
+    document.body.appendChild(toast);
+  }
+  toast.textContent = message;
+  toast.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove("show"), 2200);
+}
+
+// Removes one copy of the card at group.cards[idx]. Stacked basics decrement their
+// qty instead of disappearing outright, so "one card" leaves the stack each drag.
+function removeOneCopy(group, idx) {
+  const card = group.cards[idx];
+  if (card.qty && card.qty > 1) {
+    card.qty -= 1;
+  } else {
+    group.cards.splice(idx, 1);
+  }
+}
+
+// Adds a card dragged from search. Basic lands merge into the existing Basic Lands
+// stack (incrementing qty) instead of creating a second, separate tile.
+function addCardToDeck(deck, card) {
+  if (deckHasCard(deck, card.name) && !BASIC_LAND_NAMES.has(card.name)) {
+    showToast(`${card.name} is already in the deck.`);
+    return false;
+  }
+  if (BASIC_LAND_NAMES.has(card.name)) {
+    const basicsGroup = deck.groups.find((g) => g.isBasics);
+    const existing = basicsGroup.cards.find((c) => normalizeName(c.name) === normalizeName(card.name));
+    if (existing) {
+      existing.qty = (existing.qty || 1) + 1;
+    } else {
+      basicsGroup.cards.push({ ...card, qty: 1 });
+    }
+  } else {
+    const addedGroup = deck.groups.find((g) => g.isAdded);
+    addedGroup.cards.push({ ...card, qty: 1 });
+  }
+  return true;
+}
+
+// Wires a deck-tile for the "drag to the floating Graveyard zone to remove" gesture.
+function makeRemovable(tile, group, idx) {
+  tile.draggable = true;
+  tile.classList.add("remove-target");
+  tile.addEventListener("dragstart", (e) => {
+    dragState = { type: "remove", group, index: idx };
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", "remove");
+    tile.classList.add("dragging");
+    hidePreview();
+    spawnGraveyardZone(tile);
+  });
+  tile.addEventListener("dragend", () => {
+    tile.classList.remove("dragging");
+    dragState = null;
+    removeGraveyardZone();
+  });
+}
+
+let graveyardEl = null;
+function spawnGraveyardZone(tile) {
+  removeGraveyardZone();
+  const rect = tile.getBoundingClientRect();
+  const w = rect.width * 1.15;
+  const h = rect.height * 1.15;
+  let left = rect.right + 14;
+  let top = Math.max(8, rect.top - h - 14);
+  if (left + w > window.innerWidth - 8) left = Math.max(8, window.innerWidth - 8 - w);
+
+  graveyardEl = document.createElement("div");
+  graveyardEl.className = "graveyard-zone";
+  graveyardEl.textContent = "Graveyard";
+  graveyardEl.style.left = `${left}px`;
+  graveyardEl.style.top = `${top}px`;
+  graveyardEl.style.width = `${w}px`;
+  graveyardEl.style.height = `${h}px`;
+
+  graveyardEl.addEventListener("dragenter", (e) => {
+    if (dragState?.type !== "remove") return;
+    e.preventDefault();
+  });
+  graveyardEl.addEventListener("dragover", (e) => {
+    if (dragState?.type !== "remove") return;
+    e.preventDefault();
+    graveyardEl.classList.add("hover");
+  });
+  graveyardEl.addEventListener("dragleave", () => graveyardEl.classList.remove("hover"));
+  graveyardEl.addEventListener("drop", (e) => {
+    if (dragState?.type !== "remove") return;
+    e.preventDefault();
+    const { group, index } = dragState;
+    const card = group.cards[index];
+    removeOneCopy(group, index);
+    showToast(`Removed ${card.name}.`);
+    renderDeck(currentDeck);
+  });
+
+  document.body.appendChild(graveyardEl);
+}
+function removeGraveyardZone() {
+  if (graveyardEl) {
+    graveyardEl.remove();
+    graveyardEl = null;
+  }
+}
+
+// ---------- Add-card search ----------
+
+const addCardInput = el("add-card-input");
+const addCardResults = el("add-card-results");
+let addCardDebounce = null;
+
+addCardInput.addEventListener("input", () => {
+  const q = addCardInput.value.trim();
+  clearTimeout(addCardDebounce);
+  if (q.length < 2) {
+    addCardResults.innerHTML = "";
+    return;
+  }
+  addCardDebounce = setTimeout(() => runAddCardSearch(q), 300);
+});
+
+async function runAddCardSearch(query) {
+  if (!currentDeck) return;
+  try {
+    const escaped = query.replace(/"/g, '\\"');
+    const idFrag = identityQueryFragment(currentDeck.identity);
+    const pool = await scryfallSearch(`${idFrag} legal:commander ("${escaped}") order:edhrec`, { limit: 16 });
+    const results = pool.filter((c) => !deckHasCard(currentDeck, c.name) || BASIC_LAND_NAMES.has(c.name));
+    addCardResults.innerHTML = "";
+    if (!results.length) {
+      addCardResults.innerHTML = `<p class="add-card-empty">No matching cards in this deck's colors.</p>`;
+      return;
+    }
+    results.forEach((card) => {
+      const tile = cardTile(card, 1);
+      makeAddable(tile, card);
+      addCardResults.appendChild(tile);
+    });
+  } catch (e) {
+    addCardResults.innerHTML = `<p class="add-card-empty">Search error: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function makeAddable(tile, card) {
+  tile.draggable = true;
+  tile.addEventListener("dragstart", (e) => {
+    dragState = { type: "add", card };
+    e.dataTransfer.effectAllowed = "copy";
+    e.dataTransfer.setData("text/plain", "add");
+    tile.classList.add("dragging");
+    hidePreview();
+  });
+  tile.addEventListener("dragend", () => {
+    tile.classList.remove("dragging");
+    dragState = null;
+  });
+}
+
+const deckGroupsEl = el("deck-groups");
+deckGroupsEl.addEventListener("dragenter", (e) => {
+  if (dragState?.type !== "add") return;
+  e.preventDefault();
+});
+deckGroupsEl.addEventListener("dragover", (e) => {
+  if (dragState?.type !== "add") return;
+  e.preventDefault();
+  deckGroupsEl.classList.add("drop-hover");
+});
+deckGroupsEl.addEventListener("dragleave", (e) => {
+  if (!deckGroupsEl.contains(e.relatedTarget)) deckGroupsEl.classList.remove("drop-hover");
+});
+deckGroupsEl.addEventListener("drop", (e) => {
+  if (dragState?.type !== "add") return;
+  e.preventDefault();
+  deckGroupsEl.classList.remove("drop-hover");
+  const { card } = dragState;
+  if (addCardToDeck(currentDeck, card)) {
+    showToast(`Added ${card.name}.`);
+    renderDeck(currentDeck);
+  }
+});
+
 el("copy-btn").addEventListener("click", async () => {
-  const deck = window._lastDeck;
+  const deck = currentDeck;
   if (!deck) return;
   const lines = [`1 ${deck.commander.name}`];
   deck.groups.forEach((g) => {

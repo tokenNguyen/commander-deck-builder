@@ -262,6 +262,81 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border-radius: 20px;
   border: 1px solid rgba(255,255,255,0.15);
 }
+.card-tile.dragging { opacity: 0.35; }
+.card-tile.remove-target { cursor: grab; }
+
+.add-card-panel {
+  background: #1a1f27;
+  border: 1px solid #2c3340;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 26px;
+}
+.add-card-panel label { display: block; font-size: 13px; color: #9aa4b2; margin-bottom: 8px; }
+#add-card-input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 14px;
+  background: #212733;
+  border: 1px solid #2c3340;
+  border-radius: 8px;
+  color: #e8ebf0;
+  outline: none;
+}
+#add-card-input:focus { border-color: #6b7280; }
+.add-card-hint { margin: 8px 0 0; font-size: 12px; color: #6b7280; }
+.add-card-results {
+  margin-top: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+}
+.add-card-results:empty { margin-top: 0; }
+.add-card-results .card-tile { cursor: grab; }
+.add-card-empty { font-size: 13px; color: #6b7280; padding: 4px 2px; }
+
+#deck-groups.drop-hover { outline: 2px dashed #d7b56d; outline-offset: 8px; border-radius: 10px; }
+
+.graveyard-zone {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 10px;
+  border: 2px dashed #a6453f;
+  border-radius: 12px;
+  background: rgba(60, 20, 20, 0.55);
+  color: #f0b8b3;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  backdrop-filter: blur(2px);
+  transition: background 0.1s ease, border-color 0.1s ease;
+}
+.graveyard-zone.hover {
+  background: rgba(90, 24, 24, 0.75);
+  border-color: #e0665f;
+  color: #ffe0dd;
+}
+
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #212733;
+  border: 1px solid #3a424f;
+  color: #e8ebf0;
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  box-shadow: 0 10px 24px rgba(0,0,0,0.5);
+  z-index: 70;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+.toast.show { opacity: 1; }
 
 .card-preview {
   position: fixed;

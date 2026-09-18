@@ -133,6 +133,8 @@ main {
   outline: none;
 }
 #archetype-select:focus { border-color: #6b7280; }
+#archetype-select optgroup { color: #d7b56d; font-style: normal; font-weight: 600; }
+#archetype-select option { color: #e8ebf0; }
 .archetype-desc { margin: 6px 0 0; font-size: 12px; color: #9aa4b2; max-width: 460px; }
 
 .deck-archetype-label { margin: 2px 0 0; font-size: 13px; color: #d7b56d; }
@@ -367,11 +369,47 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   position: fixed;
   z-index: 50;
   pointer-events: none;
-  width: 240px;
+  display: none;
+  align-items: flex-start;
+  gap: 14px;
+  max-width: 560px;
+}
+.preview-img {
+  width: 220px;
+  aspect-ratio: 63 / 88;
+  object-fit: cover;
   border-radius: 14px;
   box-shadow: 0 16px 40px rgba(0,0,0,0.6);
-  display: none;
+  flex-shrink: 0;
+  background: #0f1216;
 }
+.preview-info {
+  width: 300px;
+  max-height: 460px;
+  background: #1a1f27;
+  border: 1px solid #2c3340;
+  border-radius: 12px;
+  padding: 14px;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.6);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden;
+}
+.preview-info h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #d7b56d;
+}
+.preview-why-text { margin: 0; font-size: 13px; line-height: 1.5; color: #cdd3db; }
+.preview-rulings { overflow-y: auto; min-height: 0; }
+.preview-rulings-list { display: flex; flex-direction: column; gap: 10px; }
+.ruling { font-size: 12px; line-height: 1.45; color: #cdd3db; border-top: 1px solid #232a35; padding-top: 8px; }
+.ruling:first-child { border-top: none; padding-top: 0; }
+.ruling-date { display: block; font-size: 10px; color: #6b7280; margin-bottom: 2px; }
+.preview-loading, .preview-empty { margin: 0; font-size: 12px; color: #6b7280; font-style: italic; }
 
 footer {
   text-align: center;

@@ -248,8 +248,14 @@ function selectCommander(card) {
     .map((c) => `<div class="pip pip-${c}">${c}</div>`)
     .join("");
 
+  populateArchetypeSelect(card, []);
   el("commander-panel").classList.remove("hidden");
   el("deck-panel").classList.add("hidden");
+
+  fetchCommanderThemes(card).then((themes) => {
+    if (!selectedCommander || selectedCommander.id !== card.id) return; // commander changed again meanwhile
+    populateArchetypeSelect(card, themes);
+  });
 }
 
 el("change-btn").addEventListener("click", () => {
@@ -263,20 +269,98 @@ el("build-btn").addEventListener("click", () => buildDeck());
 el("reroll-btn").addEventListener("click", () => buildDeck());
 
 // ---------- Archetype selector ----------
+//
+// Beyond the curated ARCHETYPES above, we fetch this specific commander's own theme
+// tags from EDHREC (the same "Themes" shown on a commander's EDHREC page, e.g. Atraxa
+// gets Infect / Superfriends / Proliferate) and offer those too. Picking one pulls that
+// exact commander+theme's EDHREC card recommendations for the synergy pool at build time,
+// so the cards really do reinforce that specific archetype for that specific commander —
+// not just a generic Scryfall tag search. This is an unofficial API, so every call here
+// fails soft: if EDHREC is unreachable, the curated archetypes still work as before.
 
 const archetypeSelect = el("archetype-select");
-Object.entries(ARCHETYPES).forEach(([key, a]) => {
-  const opt = document.createElement("option");
-  opt.value = key;
-  opt.textContent = a.label;
-  archetypeSelect.appendChild(opt);
-});
+let dynamicArchetypes = {}; // populated per-commander from EDHREC; keys look like "edhrec:<slug>"
+const commanderThemeCache = new Map();
+
+function resolveArchetype(key) {
+  return ARCHETYPES[key] || dynamicArchetypes[key] || ARCHETYPES.balanced;
+}
+
+function edhrecSlug(name) {
+  return name
+    .toLowerCase()
+    .replace(/\/\//g, "")
+    .replace(/[',]/g, "")
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+async function fetchCommanderThemes(card) {
+  if (commanderThemeCache.has(card.id)) return commanderThemeCache.get(card.id);
+  const slug = edhrecSlug(card.name);
+  const promise = (async () => {
+    try {
+      const res = await fetch(`https://json.edhrec.com/pages/commanders/${slug}.json`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      const links = (data.panels && data.panels.taglinks) || [];
+      return links.map((t) => ({ slug: t.slug, label: t.value, count: t.count }));
+    } catch {
+      return [];
+    }
+  })();
+  commanderThemeCache.set(card.id, promise);
+  return promise;
+}
+
+function populateArchetypeSelect(commander, themes) {
+  const previousValue = archetypeSelect.value;
+  archetypeSelect.innerHTML = "";
+  dynamicArchetypes = {};
+
+  Object.entries(ARCHETYPES).forEach(([key, a]) => {
+    const opt = document.createElement("option");
+    opt.value = key;
+    opt.textContent = a.label;
+    archetypeSelect.appendChild(opt);
+  });
+
+  const curatedLabels = new Set(Object.values(ARCHETYPES).map((a) => normalizeName(a.label)));
+  const commanderSlug = edhrecSlug(commander.name);
+  const freshThemes = themes.filter((t) => !curatedLabels.has(normalizeName(t.label))).slice(0, 14);
+
+  if (freshThemes.length) {
+    const group = document.createElement("optgroup");
+    group.label = `${commander.name}'s EDHREC themes`;
+    freshThemes.forEach((t) => {
+      const key = `edhrec:${t.slug}`;
+      dynamicArchetypes[key] = {
+        label: t.label,
+        description: `An EDHREC theme for ${commander.name} — seen in ${t.count.toLocaleString()} decks. Synergy cards are pulled live from EDHREC for this exact commander + theme.`,
+        dynamicEdhrec: true,
+        commanderSlug,
+        themeSlug: t.slug,
+        synergyCount: 18,
+      };
+      const opt = document.createElement("option");
+      opt.value = key;
+      opt.textContent = t.label;
+      group.appendChild(opt);
+    });
+    archetypeSelect.appendChild(group);
+  }
+
+  archetypeSelect.value = [...archetypeSelect.options].some((o) => o.value === previousValue) ? previousValue : "balanced";
+  updateArchetypeDesc();
+}
 
 function updateArchetypeDesc() {
-  const a = ARCHETYPES[archetypeSelect.value] || ARCHETYPES.balanced;
+  const a = resolveArchetype(archetypeSelect.value);
   el("archetype-desc").textContent = a.description || "";
 }
 archetypeSelect.addEventListener("change", updateArchetypeDesc);
+populateArchetypeSelect({ name: "" }, []);
 updateArchetypeDesc();
 
 // Creature subtypes after the em dash in a type line, e.g. "Legendary Creature — Human Wizard"
@@ -310,7 +394,7 @@ async function buildDeck() {
   el("deck-panel").classList.add("hidden");
 
   try {
-    const archetype = ARCHETYPES[archetypeSelect.value] || ARCHETYPES.balanced;
+    const archetype = resolveArchetype(archetypeSelect.value);
     const targets = { ...DEFAULT_TARGETS, ...(archetype.targets || {}) };
     const extraFilter = archetype.extraFilter ? ` ${archetype.extraFilter}` : "";
 
@@ -383,6 +467,41 @@ async function buildDeck() {
       } else {
         synergyNote = "No creature type detected on this commander — used goodstuff picks instead.";
       }
+    } else if (archetype.dynamicEdhrec) {
+      await setStatus(`Pulling ${archetype.label} synergy cards from EDHREC...`);
+      try {
+        const res = await fetch(`https://json.edhrec.com/pages/commanders/${archetype.commanderSlug}/${archetype.themeSlug}.json`);
+        if (!res.ok) throw new Error(`EDHREC theme page unavailable (${res.status})`);
+        const data = await res.json();
+        const cardlists = (data.container && data.container.json_dict && data.container.json_dict.cardlists) || [];
+        const seenIds = new Set();
+        const candidateIds = [];
+        ["highsynergycards", "topcards", "gamechangers"].forEach((tag) => {
+          const list = cardlists.find((c) => c.tag === tag);
+          if (!list) return;
+          list.cardviews.forEach((cv) => {
+            if (cv.id && !seenIds.has(cv.id)) {
+              seenIds.add(cv.id);
+              candidateIds.push({ id: cv.id });
+            }
+          });
+        });
+        if (candidateIds.length) {
+          const collRes = await fetch(`${SCRYFALL}/cards/collection`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ identifiers: candidateIds.slice(0, 60) }),
+          });
+          const collData = await collRes.json();
+          const resolved = (collData.data || []).filter((c) => isColorLegal(c, identity));
+          synergy = takeFresh(resolved, Math.min(archetype.synergyCount, fillNeeded));
+        }
+        if (!synergy.length) synergyNote = "No EDHREC synergy cards found for this theme in your colors — used goodstuff picks instead.";
+      } catch (err) {
+        console.error(err);
+        synergyNote = "Couldn't load EDHREC data for this theme — used goodstuff picks instead.";
+      }
+      await sleep(90);
     } else if (archetype.synergyQuery) {
       await setStatus(`Finding ${archetype.label} synergy cards...`);
       const pool = await scryfallSearch(`${legalBase} ${archetype.synergyQuery}${extraFilter} order:edhrec`, { limit: 60 });
@@ -428,6 +547,7 @@ async function buildDeck() {
     const deck = {
       commander: selectedCommander,
       archetypeLabel: archetype.label,
+      archetypeDescription: archetype.description,
       synergyNote,
       identity,
       groups,
@@ -447,6 +567,14 @@ async function buildDeck() {
 
 function normalizeName(name) {
   return name.trim().toLowerCase();
+}
+
+// EDHREC's theme pages are scoped to the commander already, but this is a cheap
+// extra guarantee that nothing off-color slips into the deck from that pool.
+function isColorLegal(card, identity) {
+  const cardColors = card.color_identity || [];
+  if (!identity.length) return cardColors.length === 0;
+  return cardColors.every((c) => identity.includes(c));
 }
 
 // Fetch lands (Polluted Delta, etc.) have no mana symbols in their text, so Scryfall
@@ -574,7 +702,7 @@ function renderDeck(deck) {
   commanderGroup.innerHTML = `<h3><span>Commander</span></h3>`;
   const cGrid = document.createElement("div");
   cGrid.className = "card-grid";
-  cGrid.appendChild(cardTile(deck.commander, 1));
+  cGrid.appendChild(cardTile(deck.commander, 1, "Commander"));
   commanderGroup.appendChild(cGrid);
   groupsEl.appendChild(commanderGroup);
 
@@ -587,7 +715,7 @@ function renderDeck(deck) {
     const grid = document.createElement("div");
     grid.className = "card-grid";
     dg.entries.forEach((entry) => {
-      const tile = cardTile(entry.card, entry.qty);
+      const tile = cardTile(entry.card, entry.qty, entry.group.name);
       makeRemovable(tile, entry.group, entry.index);
       grid.appendChild(tile);
     });
@@ -602,8 +730,10 @@ function renderDeck(deck) {
 }
 
 // Renders an actual card image (not a text row) for every card, including basic lands
-// once their art has been fetched in buildDeck's balancing step.
-function cardTile(card, qty) {
+// once their art has been fetched in buildDeck's balancing step. `groupName` is the
+// card's real functional category (Ramp, Removal, ...) — used by the hover preview to
+// explain why the card is in the deck; undefined for cards not yet added (search results).
+function cardTile(card, qty, groupName) {
   const tile = document.createElement("div");
   tile.className = "card-tile";
   tile.title = card.name;
@@ -626,7 +756,7 @@ function cardTile(card, qty) {
     badge.textContent = `×${qty}`;
     tile.appendChild(badge);
   }
-  tile.addEventListener("mouseenter", (e) => showPreview(card, e));
+  tile.addEventListener("mouseenter", (e) => showPreview(card, e, groupName));
   tile.addEventListener("mousemove", positionPreview);
   tile.addEventListener("mouseleave", hidePreview);
   return tile;
@@ -639,28 +769,162 @@ function missingArtLabel(name) {
   return label;
 }
 
+// ---------- Hover preview: enlarged card + why-it's-here + live Scryfall rulings ----------
+
 let previewEl = null;
-function showPreview(card, e) {
+let previewImgEl = null;
+let previewWhyEl = null;
+let previewRulingsEl = null;
+let previewToken = 0; // invalidates stale async ruling fetches when the hover target changes
+let lastMouseX = 0;
+let lastMouseY = 0;
+
+function ensurePreviewEl() {
+  if (previewEl) return;
+  previewEl = document.createElement("div");
+  previewEl.className = "card-preview";
+  previewEl.innerHTML = `
+    <img class="preview-img" alt="" />
+    <div class="preview-info">
+      <div class="preview-why">
+        <h4>Why it's here</h4>
+        <p class="preview-why-text"></p>
+      </div>
+      <div class="preview-rulings">
+        <h4>Rulings</h4>
+        <div class="preview-rulings-list"></div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(previewEl);
+  previewImgEl = previewEl.querySelector(".preview-img");
+  previewWhyEl = previewEl.querySelector(".preview-why-text");
+  previewRulingsEl = previewEl.querySelector(".preview-rulings-list");
+}
+
+async function showPreview(card, e, groupName) {
   const art = cardArt(card, "normal") || cardArt(card, "small");
   if (!art) return;
-  if (!previewEl) {
-    previewEl = document.createElement("img");
-    previewEl.className = "card-preview";
-    document.body.appendChild(previewEl);
-  }
-  previewEl.src = art;
-  previewEl.style.display = "block";
+  ensurePreviewEl();
+  const myToken = ++previewToken;
+
+  previewImgEl.src = art;
+  previewImgEl.alt = card.name;
+  previewWhyEl.textContent = buildWhyText(card, groupName);
+  previewRulingsEl.innerHTML = `<p class="preview-loading">Loading rulings…</p>`;
+  previewEl.style.display = "flex";
   positionPreview(e);
+
+  const rulings = await fetchRulings(card);
+  if (myToken !== previewToken) return; // user moved to a different card meanwhile
+  renderRulings(rulings);
+  positionPreview();
 }
+
 function positionPreview(e) {
+  if (e) {
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+  }
   if (!previewEl) return;
-  const x = Math.min(e.clientX + 20, window.innerWidth - 260);
-  const y = Math.min(e.clientY + 20, window.innerHeight - 340);
+  const rect = previewEl.getBoundingClientRect();
+  const w = rect.width || 540;
+  const h = rect.height || 300;
+  const x = Math.max(12, Math.min(lastMouseX + 20, window.innerWidth - w - 12));
+  const y = Math.max(12, Math.min(lastMouseY + 20, window.innerHeight - h - 12));
   previewEl.style.left = x + "px";
   previewEl.style.top = y + "px";
 }
 function hidePreview() {
   if (previewEl) previewEl.style.display = "none";
+  previewToken++; // invalidate any ruling fetch still in flight for the card just left
+}
+
+function cardOracleText(card) {
+  return card.oracle_text || (card.card_faces ? card.card_faces.map((f) => f.oracle_text || "").join(" ") : "") || "";
+}
+
+// Best-effort, not exhaustive — just enough to surface an obvious shared theme
+// (e.g. both the commander and the card mention "proliferate" or "sacrifice").
+const SYNERGY_KEYWORDS = [
+  "proliferate", "sacrifice", "graveyard", "token", "artifact", "enchantment",
+  "counter", "draw a card", "exile", "lifelink", "deathtouch", "flying",
+  "landfall", "discard", "mill", "tutor", "treasure", "convoke", "storm",
+];
+function synergyKeywords(commander, card) {
+  const cText = cardOracleText(commander).toLowerCase();
+  const kText = cardOracleText(card).toLowerCase();
+  return SYNERGY_KEYWORDS.filter((k) => cText.includes(k) && kText.includes(k));
+}
+
+// Explains why a card is in the deck using the deck-builder's actual selection logic
+// (its functional category), not a guess — plus a lightweight keyword-overlap hint.
+// There's no backend/LLM here, so this stays rule-based rather than freeform analysis.
+function buildWhyText(card, groupName) {
+  if (!currentDeck) return "";
+  const commander = currentDeck.commander;
+  if (card.id && card.id === commander.id) {
+    const colors = commander.color_identity && commander.color_identity.length ? commander.color_identity.join("") : "colorless";
+    return `Your commander — its color identity (${colors}) and abilities set the whole game plan for this deck.`;
+  }
+
+  let base;
+  if (!groupName) {
+    base = "Not yet in your deck — drag this card into the deck to add it.";
+  } else if (groupName === "Ramp") {
+    base = `Included as Ramp, to accelerate you toward ${commander.name} and your bigger spells sooner.`;
+  } else if (groupName === "Removal") {
+    base = "Included as Removal, to answer a threatening creature, artifact, or enchantment an opponent controls.";
+  } else if (groupName === "Board Wipes") {
+    base = "Included as a Board Wipe, to reset the board when you're behind.";
+  } else if (groupName === "Card Draw") {
+    base = "Included for Card Draw, to keep your hand stocked with answers and threats.";
+  } else if (groupName.endsWith(" Synergy")) {
+    base = `Picked for the ${currentDeck.archetypeLabel} plan${currentDeck.archetypeDescription ? " — " + currentDeck.archetypeDescription : ""}`;
+  } else if (groupName === "Added Cards") {
+    base = "You added this card to the deck yourself.";
+  } else if (groupName === "Nonbasic Lands" || groupName === "Basic Lands") {
+    base = "Part of your mana base, providing colors this deck needs.";
+  } else {
+    base = `A strong general-purpose pick alongside ${commander.name}.`;
+  }
+
+  const overlap = synergyKeywords(commander, card);
+  if (overlap.length) {
+    base += ` It also shares a theme with ${commander.name}: ${overlap.slice(0, 2).join(" & ")}.`;
+  }
+  return base;
+}
+
+const rulingsCache = new Map();
+async function fetchRulings(card) {
+  if (!card.id) return [];
+  if (rulingsCache.has(card.id)) return rulingsCache.get(card.id);
+  if (!card.rulings_uri) return [];
+  try {
+    const res = await fetch(card.rulings_uri);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const rulings = data.data || [];
+    rulingsCache.set(card.id, rulings);
+    return rulings;
+  } catch {
+    return [];
+  }
+}
+
+function renderRulings(rulings) {
+  if (!rulings.length) {
+    previewRulingsEl.innerHTML = `<p class="preview-empty">No official rulings for this card.</p>`;
+    return;
+  }
+  const shown = rulings.slice(0, 5);
+  const remainder = rulings.length - shown.length;
+  previewRulingsEl.innerHTML =
+    shown
+      .map((r) => `<div class="ruling"><span class="ruling-date">${escapeHtml(r.published_at)}</span>${escapeHtml(r.comment)}</div>`)
+      .join("") +
+    (remainder > 0 ? `<p class="preview-empty">+${remainder} more ruling${remainder === 1 ? "" : "s"} on Scryfall.</p>` : "");
 }
 
 function renderCurve(deck) {

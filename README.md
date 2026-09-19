@@ -19,7 +19,9 @@ the [Scryfall API](https://scryfall.com/docs/api). One small serverless function
    Everything is sorted by EDHREC popularity rank, so you get real, playable staples
    rather than random cards. **Rebuild** reruns the same pipeline for fresh picks.
 4. Click any card to open a details window over the page (the deck stays visible,
-   dimmed, behind it) with a large image and three tabs: official **Rulings**,
+   dimmed, behind it) with a large image, an **estimated CAD price** (Scryfall's USD
+   price converted at the day's rate from [Frankfurter](https://frankfurter.dev); real
+   Canadian store prices are usually higher), and three tabs: official **Rulings**,
    **Combos** from Commander Spellbook, and **Replacements**, other popular cards for
    the same job that aren't in your deck yet, with a **Swap in** button that puts the
    new card in the old one's slot. Drag cards to add or remove them (see the hint

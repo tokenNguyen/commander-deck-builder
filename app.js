@@ -956,6 +956,7 @@ function openCardModal(card, ctx) {
   modalEl.classList.remove("hidden");
   document.body.style.overflow = "hidden";
   showModalTab("rulings");
+  renderPrice(card, modalState.token);
   el("modal-close").focus();
 }
 
@@ -1021,6 +1022,118 @@ document.addEventListener("keydown", (e) => {
     }
   }
 });
+
+// ---------- Estimated price ----------
+//
+// Scryfall gives every card a USD price (from TCGplayer). We convert that to CAD with the
+// day's exchange rate, so it's an estimate: Canadian shops usually charge more than a straight
+// conversion. If the rate can't be loaded, the USD price is shown on its own.
+
+const modalPriceEl = el("modal-price");
+let usdToCadPromise = null; // { rate, date } | null
+
+function fetchUsdToCad() {
+  if (!usdToCadPromise) {
+    const promise = (async () => {
+      try {
+        const res = await fetch("https://api.frankfurter.dev/v1/latest?base=USD&symbols=CAD");
+        if (!res.ok) return null;
+        const data = await res.json();
+        const rate = data.rates && data.rates.CAD;
+        return typeof rate === "number" && rate > 0 ? { rate, date: String(data.date || "") } : null;
+      } catch {
+        return null;
+      }
+    })();
+    usdToCadPromise = promise;
+    promise.then((result) => {
+      if (result === null && usdToCadPromise === promise) usdToCadPromise = null; // retry next time
+    });
+  }
+  return usdToCadPromise;
+}
+
+// Regular price first; foil and etched only when the card has them. Cards that only exist
+// as foil have no regular price, so their foil price leads instead.
+function cardPrices(card) {
+  const p = card.prices || {};
+  return [
+    { label: "", usd: parseFloat(p.usd) },
+    { label: "foil", usd: parseFloat(p.usd_foil) },
+    { label: "etched", usd: parseFloat(p.usd_etched) },
+  ].filter((x) => Number.isFinite(x.usd) && x.usd > 0);
+}
+
+// The printing shown can lack a price (for example one from a set that hasn't released yet),
+// so fall back to the cheapest printing that has one, and say so.
+const cheapestPrintingCache = new Map(); // oracle id -> Promise<card | null>
+function fetchCheapestPrinting(card) {
+  if (!card.oracle_id) return Promise.resolve(null);
+  if (!cheapestPrintingCache.has(card.oracle_id)) {
+    const promise = (async () => {
+      const q = encodeURIComponent(`oracleid:${card.oracle_id} game:paper usd>0`);
+      try {
+        const res = await fetch(`${SCRYFALL}/cards/search?q=${q}&unique=prints&order=usd&dir=asc`);
+        if (res.status === 404) return null; // no printing has a price
+        if (!res.ok) throw new Error(`Scryfall ${res.status}`);
+        const data = await res.json();
+        return (data.data && data.data[0]) || null;
+      } catch {
+        cheapestPrintingCache.delete(card.oracle_id); // retry next time
+        return null;
+      }
+    })();
+    cheapestPrintingCache.set(card.oracle_id, promise);
+  }
+  return cheapestPrintingCache.get(card.oracle_id);
+}
+
+async function renderPrice(card, token) {
+  modalPriceEl.classList.add("hidden");
+  modalPriceEl.textContent = "";
+  const stale = () => !modalState || modalState.token !== token; // window moved on while we waited
+
+  let prices = cardPrices(card);
+  let fallbackSet = null;
+  if (!prices.length) {
+    const cheapest = await fetchCheapestPrinting(card);
+    if (stale() || !cheapest) return;
+    prices = cardPrices(cheapest);
+    fallbackSet = cheapest.set_name;
+  }
+  if (!prices.length) return;
+
+  const fx = await fetchUsdToCad();
+  if (stale()) return;
+
+  const usd = (n) => `US$${n.toFixed(2)}`;
+  const show = (p) => (fx ? `$${(p.usd * fx.rate).toFixed(2)} CAD` : usd(p.usd));
+  const [main, ...others] = prices;
+
+  const line = document.createElement("div");
+  line.className = "price-line";
+  const mainEl = document.createElement("span");
+  mainEl.className = "price-main";
+  mainEl.textContent = `${fx ? "≈ " : ""}${show(main)}${main.label ? ` (${main.label})` : ""}`;
+  line.appendChild(mainEl);
+  others.forEach((p) => {
+    const alt = document.createElement("span");
+    alt.className = "price-alt";
+    alt.textContent = `${p.label} ${fx ? "≈ " : ""}${show(p)}`;
+    line.appendChild(alt);
+  });
+
+  const note = document.createElement("div");
+  note.className = "price-note";
+  const lead = fallbackSet ? `No price yet for this printing, so this uses the cheapest printing (${fallbackSet}): ` : "";
+  const source = `${usd(main.usd)} on Scryfall / TCGplayer`;
+  note.textContent = fx
+    ? `${lead || "Estimated from "}${source}, at 1 USD = ${fx.rate.toFixed(3)} CAD${fx.date ? ` (rates of ${fx.date})` : ""}. Canadian stores usually charge more.`
+    : `${lead}${source}. The CAD conversion isn't available right now.`;
+
+  modalPriceEl.replaceChildren(line, note);
+  modalPriceEl.classList.remove("hidden");
+}
 
 // ---------- Replacements ----------
 //

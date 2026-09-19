@@ -314,6 +314,55 @@ async function fetchCommanderThemes(card) {
   return promise;
 }
 
+// Fetches the card pools EDHREC shows for one specific commander + theme combination
+// (its "Creatures", "Instants", "Mana Artifacts", "High Synergy Cards" sections, etc.),
+// keyed by their tag. Used to bias deck-building toward that exact theme, not just a
+// small "synergy" slice of the deck.
+async function fetchEdhrecThemeData(commanderSlug, themeSlug) {
+  const res = await fetch(`https://json.edhrec.com/pages/commanders/${commanderSlug}/${themeSlug}.json`);
+  if (!res.ok) throw new Error(`EDHREC theme page unavailable (${res.status})`);
+  const data = await res.json();
+  const cardlists = (data.container && data.container.json_dict && data.container.json_dict.cardlists) || [];
+  const byTag = {};
+  cardlists.forEach((c) => {
+    byTag[c.tag] = c.cardviews || [];
+  });
+  return byTag;
+}
+
+function collectThemeIds(byTag, tags, capPerTag) {
+  const seen = new Set();
+  const ids = [];
+  tags.forEach((tag) => {
+    (byTag[tag] || []).slice(0, capPerTag).forEach((cv) => {
+      if (cv.id && !seen.has(cv.id)) {
+        seen.add(cv.id);
+        ids.push(cv.id);
+      }
+    });
+  });
+  return ids;
+}
+
+// Scryfall's collection endpoint resolves up to 75 identifiers per request.
+async function resolveCardsByIds(ids) {
+  const out = [];
+  for (let i = 0; i < ids.length; i += 75) {
+    const chunk = ids.slice(i, i + 75).map((id) => ({ id }));
+    const res = await fetch(`${SCRYFALL}/cards/collection`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ identifiers: chunk }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      out.push(...(data.data || []));
+    }
+    if (i + 75 < ids.length) await sleep(80);
+  }
+  return out;
+}
+
 function populateArchetypeSelect(commander, themes) {
   const previousValue = archetypeSelect.value;
   archetypeSelect.innerHTML = "";
@@ -415,36 +464,86 @@ async function buildDeck() {
       return picked;
     };
 
+    // For a dynamic EDHREC archetype, pull that exact commander+theme's card pools up
+    // front so every category below leans on real EDHREC data, not just a small
+    // "synergy" slice — this is what actually makes a deck feel built around the theme.
+    let themePools = null; // { synergy, ramp, lands, fill }
+    let themeNameSet = null; // every card name EDHREC associates with this commander+theme
+    let synergyNote = "";
+    if (archetype.dynamicEdhrec) {
+      await setStatus(`Loading ${archetype.label} data from EDHREC...`);
+      try {
+        const byTag = await fetchEdhrecThemeData(archetype.commanderSlug, archetype.themeSlug);
+        const idGroups = {
+          synergy: collectThemeIds(byTag, ["highsynergycards", "topcards", "gamechangers"], 15),
+          ramp: collectThemeIds(byTag, ["manaartifacts"], 20),
+          lands: collectThemeIds(byTag, ["utilitylands", "lands"], 25),
+          fill: collectThemeIds(byTag, ["creatures", "instants", "sorceries", "utilityartifacts", "enchantments", "planeswalkers"], 30),
+        };
+        const allIds = [...new Set(Object.values(idGroups).flat())];
+        await setStatus(`Resolving ${archetype.label} cards from EDHREC...`);
+        const resolved = (await resolveCardsByIds(allIds)).filter((c) => isColorLegal(c, identity));
+        const cardById = new Map(resolved.map((c) => [c.id, c]));
+        const mapIds = (ids) => ids.map((id) => cardById.get(id)).filter(Boolean);
+        themePools = {
+          synergy: mapIds(idGroups.synergy),
+          ramp: mapIds(idGroups.ramp),
+          lands: mapIds(idGroups.lands),
+          fill: mapIds(idGroups.fill),
+        };
+        themeNameSet = new Set(resolved.map((c) => normalizeName(c.name)));
+      } catch (err) {
+        console.error(err);
+        synergyNote = "Couldn't load EDHREC data for this theme — used goodstuff picks instead.";
+      }
+      await sleep(90);
+    }
+
+    // Moves any on-theme card to the front of a category's candidate pool. It never
+    // narrows the pool, so a deck still gets a full, functional set of removal/draw/etc.
+    // even when the theme itself has little to say about that category. A no-op for
+    // every archetype except a dynamic EDHREC one (themeNameSet stays null otherwise).
+    const prioritizeByTheme = (pool) => {
+      if (!themeNameSet || !themeNameSet.size) return pool;
+      const onTheme = [];
+      const rest = [];
+      pool.forEach((c) => (themeNameSet.has(normalizeName(c.name)) ? onTheme : rest).push(c));
+      return [...onTheme, ...rest];
+    };
+
     await setStatus("Finding ramp...");
-    const rampPool = await scryfallSearch(`${legalBase} otag:ramp order:edhrec`, { limit: 60 });
-    const ramp = takeFresh(rampPool, targets.ramp);
+    const rampCandidates = [...(themePools?.ramp || []), ...(await scryfallSearch(`${legalBase} otag:ramp order:edhrec`, { limit: 60 }))];
+    const ramp = takeFresh(rampCandidates, targets.ramp);
     await sleep(90);
 
     await setStatus("Finding removal...");
-    const removalPool = await scryfallSearch(`${legalBase} otag:removal order:edhrec`, { limit: 60 });
+    const removalPool = prioritizeByTheme(await scryfallSearch(`${legalBase} otag:removal order:edhrec`, { limit: 60 }));
     const removal = takeFresh(removalPool, targets.removal);
     await sleep(90);
 
     let wipe = [];
     if (targets.wipe > 0) {
       await setStatus("Finding board wipes...");
-      const wipePool = await scryfallSearch(`${legalBase} otag:board-wipe order:edhrec`, { limit: 40 });
+      const wipePool = prioritizeByTheme(await scryfallSearch(`${legalBase} otag:board-wipe order:edhrec`, { limit: 40 }));
       wipe = takeFresh(wipePool, targets.wipe);
       await sleep(90);
     }
 
     await setStatus("Finding card draw...");
-    const drawPool = await scryfallSearch(`${legalBase} otag:card-advantage order:edhrec`, { limit: 60 });
+    const drawPool = prioritizeByTheme(await scryfallSearch(`${legalBase} otag:card-advantage order:edhrec`, { limit: 60 }));
     let draw = takeFresh(drawPool, targets.draw);
     if (draw.length < targets.draw) {
-      const drawPool2 = await scryfallSearch(`${legalBase} otag:card-draw order:edhrec`, { limit: 60 });
+      const drawPool2 = prioritizeByTheme(await scryfallSearch(`${legalBase} otag:card-draw order:edhrec`, { limit: 60 }));
       draw = draw.concat(takeFresh(drawPool2, targets.draw - draw.length));
     }
     await sleep(90);
 
     await setStatus("Finding nonbasic lands...");
-    const landPool = await scryfallSearch(`${idFrag} legal:commander t:land -t:basic game:paper order:edhrec`, { limit: 60 });
-    const relevantLandPool = landPool.filter((c) => isLandRelevant(c, identity));
+    const landCandidates = [
+      ...(themePools?.lands || []),
+      ...(await scryfallSearch(`${idFrag} legal:commander t:land -t:basic game:paper order:edhrec`, { limit: 60 })),
+    ];
+    const relevantLandPool = landCandidates.filter((c) => isLandRelevant(c, identity));
     const nonbasicLands = takeFresh(relevantLandPool, targets.nonbasicLands);
     await sleep(90);
 
@@ -454,7 +553,6 @@ async function buildDeck() {
     // Archetype synergy pool: pulls themed cards (sacrifice outlets, token makers, etc.)
     // before the general goodstuff pool fills whatever's left.
     let synergy = [];
-    let synergyNote = "";
     if (archetype.dynamicTribal) {
       const tribalTypes = getCreatureSubtypes(selectedCommander);
       if (tribalTypes.length) {
@@ -468,40 +566,12 @@ async function buildDeck() {
         synergyNote = "No creature type detected on this commander — used goodstuff picks instead.";
       }
     } else if (archetype.dynamicEdhrec) {
-      await setStatus(`Pulling ${archetype.label} synergy cards from EDHREC...`);
-      try {
-        const res = await fetch(`https://json.edhrec.com/pages/commanders/${archetype.commanderSlug}/${archetype.themeSlug}.json`);
-        if (!res.ok) throw new Error(`EDHREC theme page unavailable (${res.status})`);
-        const data = await res.json();
-        const cardlists = (data.container && data.container.json_dict && data.container.json_dict.cardlists) || [];
-        const seenIds = new Set();
-        const candidateIds = [];
-        ["highsynergycards", "topcards", "gamechangers"].forEach((tag) => {
-          const list = cardlists.find((c) => c.tag === tag);
-          if (!list) return;
-          list.cardviews.forEach((cv) => {
-            if (cv.id && !seenIds.has(cv.id)) {
-              seenIds.add(cv.id);
-              candidateIds.push({ id: cv.id });
-            }
-          });
-        });
-        if (candidateIds.length) {
-          const collRes = await fetch(`${SCRYFALL}/cards/collection`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ identifiers: candidateIds.slice(0, 60) }),
-          });
-          const collData = await collRes.json();
-          const resolved = (collData.data || []).filter((c) => isColorLegal(c, identity));
-          synergy = takeFresh(resolved, Math.min(archetype.synergyCount, fillNeeded));
-        }
-        if (!synergy.length) synergyNote = "No EDHREC synergy cards found for this theme in your colors — used goodstuff picks instead.";
-      } catch (err) {
-        console.error(err);
-        synergyNote = "Couldn't load EDHREC data for this theme — used goodstuff picks instead.";
+      if (themePools && themePools.synergy.length) {
+        synergy = takeFresh(themePools.synergy, Math.min(archetype.synergyCount, fillNeeded));
       }
-      await sleep(90);
+      if (!synergy.length && !synergyNote) {
+        synergyNote = "No EDHREC synergy cards found for this theme in your colors — used goodstuff picks instead.";
+      }
     } else if (archetype.synergyQuery) {
       await setStatus(`Finding ${archetype.label} synergy cards...`);
       const pool = await scryfallSearch(`${legalBase} ${archetype.synergyQuery}${extraFilter} order:edhrec`, { limit: 60 });
@@ -511,14 +581,27 @@ async function buildDeck() {
 
     await setStatus("Rounding out the rest of the deck...");
     const generalFillNeeded = fillNeeded - synergy.length;
-    const fillPool = await scryfallSearch(`${legalBase} -t:land${extraFilter} order:edhrec`, { limit: 200 });
-    const fill = takeFresh(fillPool, generalFillNeeded);
+    // The theme's own Creatures/Instants/Sorceries/Artifacts/Enchantments/Planeswalkers
+    // lists are the primary fill source for a dynamic EDHREC archetype — this is the
+    // category that used to be 100% generic regardless of the chosen theme. The plain
+    // Scryfall pool below only fills in if that runs short (rare, but always fetched
+    // for every other archetype exactly as before).
+    let fill = themePools ? takeFresh(themePools.fill, generalFillNeeded) : [];
+    let fillPool = null;
+    const ensureFillPool = async () => {
+      if (!fillPool) fillPool = await scryfallSearch(`${legalBase} -t:land${extraFilter} order:edhrec`, { limit: 200 });
+      return fillPool;
+    };
+    if (fill.length < generalFillNeeded) {
+      const pool = await ensureFillPool();
+      fill = fill.concat(takeFresh(pool, generalFillNeeded - fill.length));
+    }
 
     // If any category came up short (small/obscure color identity), pad from the general pool.
     let shortfall = 99 - targets.totalLands - (fixedNonland + synergy.length + fill.length);
     if (shortfall > 0) {
-      const extra = takeFresh(fillPool, shortfall);
-      fill.push(...extra);
+      const pool = await ensureFillPool();
+      fill.push(...takeFresh(pool, shortfall));
       shortfall = 99 - targets.totalLands - (fixedNonland + synergy.length + fill.length);
     }
 

@@ -256,6 +256,63 @@ function selectCommander(card) {
     if (!selectedCommander || selectedCommander.id !== card.id) return; // commander changed again meanwhile
     populateArchetypeSelect(card, themes);
   });
+
+  el("archidekt-panel").classList.add("hidden");
+  fetchArchidektDecks(card).then((decks) => {
+    if (!selectedCommander || selectedCommander.id !== card.id) return;
+    renderArchidektDecks(decks);
+  });
+}
+
+// Most-viewed public Commander decks on Archidekt for this commander, through /api/proxy
+// (Archidekt blocks direct browser requests). Hidden whenever the lookup isn't available.
+const archidektCache = new Map();
+function fetchArchidektDecks(card) {
+  if (!archidektCache.has(card.id)) {
+    const promise = (async () => {
+      try {
+        const res = await fetch(`/api/proxy?target=archidekt&commander=${encodeURIComponent(card.name)}`);
+        if (!res.ok) return null;
+        const data = await res.json();
+        return Array.isArray(data.decks) ? data.decks : null;
+      } catch {
+        return null;
+      }
+    })();
+    archidektCache.set(card.id, promise);
+    promise.then((result) => {
+      if (result === null) archidektCache.delete(card.id);
+    });
+  }
+  return archidektCache.get(card.id);
+}
+
+function renderArchidektDecks(decks) {
+  const list = el("archidekt-list");
+  list.innerHTML = "";
+  const usable = (decks || []).filter((d) => typeof d.url === "string" && d.url.startsWith("https://archidekt.com/decks/"));
+  if (!usable.length) {
+    el("archidekt-panel").classList.add("hidden");
+    return;
+  }
+  usable.forEach((d) => {
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    a.href = d.url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = d.name || "Untitled deck";
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    const bits = [];
+    if (d.owner) bits.push(`by ${d.owner}`);
+    bits.push(`${(d.views || 0).toLocaleString()} views`);
+    if (d.bracket) bits.push(`Bracket ${d.bracket}`);
+    meta.textContent = bits.join(" · ");
+    li.append(a, meta);
+    list.appendChild(li);
+  });
+  el("archidekt-panel").classList.remove("hidden");
 }
 
 el("change-btn").addEventListener("click", () => {
@@ -630,7 +687,6 @@ async function buildDeck() {
     const deck = {
       commander: selectedCommander,
       archetypeLabel: archetype.label,
-      archetypeDescription: archetype.description,
       synergyNote,
       identity,
       groups,
@@ -785,7 +841,7 @@ function renderDeck(deck) {
   commanderGroup.innerHTML = `<h3><span>Commander</span></h3>`;
   const cGrid = document.createElement("div");
   cGrid.className = "card-grid";
-  cGrid.appendChild(cardTile(deck.commander, 1, "Commander"));
+  cGrid.appendChild(cardTile(deck.commander, 1));
   commanderGroup.appendChild(cGrid);
   groupsEl.appendChild(commanderGroup);
 
@@ -798,7 +854,7 @@ function renderDeck(deck) {
     const grid = document.createElement("div");
     grid.className = "card-grid";
     dg.entries.forEach((entry) => {
-      const tile = cardTile(entry.card, entry.qty, entry.group.name);
+      const tile = cardTile(entry.card, entry.qty);
       makeRemovable(tile, entry.group, entry.index);
       grid.appendChild(tile);
     });
@@ -813,10 +869,8 @@ function renderDeck(deck) {
 }
 
 // Renders an actual card image (not a text row) for every card, including basic lands
-// once their art has been fetched in buildDeck's balancing step. `groupName` is the
-// card's real functional category (Ramp, Removal, ...) — used by the hover preview to
-// explain why the card is in the deck; undefined for cards not yet added (search results).
-function cardTile(card, qty, groupName) {
+// once their art has been fetched in buildDeck's balancing step.
+function cardTile(card, qty) {
   const tile = document.createElement("div");
   tile.className = "card-tile";
   tile.title = card.name;
@@ -839,7 +893,7 @@ function cardTile(card, qty, groupName) {
     badge.textContent = `×${qty}`;
     tile.appendChild(badge);
   }
-  tile.addEventListener("mouseenter", (e) => showPreview(card, e, groupName));
+  tile.addEventListener("mouseenter", (e) => showPreview(card, e));
   tile.addEventListener("mousemove", positionPreview);
   tile.addEventListener("mouseleave", hidePreview);
   return tile;
@@ -852,13 +906,14 @@ function missingArtLabel(name) {
   return label;
 }
 
-// ---------- Hover preview: enlarged card + why-it's-here + live Scryfall rulings ----------
+// ---------- Hover preview: enlarged card + combos + live Scryfall rulings ----------
 
 let previewEl = null;
 let previewImgEl = null;
-let previewWhyEl = null;
+let previewCombosSectionEl = null;
+let previewCombosEl = null;
 let previewRulingsEl = null;
-let previewToken = 0; // invalidates stale async ruling fetches when the hover target changes
+let previewToken = 0; // invalidates stale async fetches when the hover target changes
 let lastMouseX = 0;
 let lastMouseY = 0;
 
@@ -869,9 +924,9 @@ function ensurePreviewEl() {
   previewEl.innerHTML = `
     <img class="preview-img" alt="" />
     <div class="preview-info">
-      <div class="preview-why">
-        <h4>Why it's here</h4>
-        <p class="preview-why-text"></p>
+      <div class="preview-combos hidden">
+        <h4>Combos</h4>
+        <div class="preview-combos-list"></div>
       </div>
       <div class="preview-rulings">
         <h4>Rulings</h4>
@@ -881,11 +936,12 @@ function ensurePreviewEl() {
   `;
   document.body.appendChild(previewEl);
   previewImgEl = previewEl.querySelector(".preview-img");
-  previewWhyEl = previewEl.querySelector(".preview-why-text");
+  previewCombosSectionEl = previewEl.querySelector(".preview-combos");
+  previewCombosEl = previewEl.querySelector(".preview-combos-list");
   previewRulingsEl = previewEl.querySelector(".preview-rulings-list");
 }
 
-async function showPreview(card, e, groupName) {
+function showPreview(card, e) {
   const art = cardArt(card, "normal") || cardArt(card, "small");
   if (!art) return;
   ensurePreviewEl();
@@ -893,15 +949,27 @@ async function showPreview(card, e, groupName) {
 
   previewImgEl.src = art;
   previewImgEl.alt = card.name;
-  previewWhyEl.textContent = buildWhyText(card, groupName);
   previewRulingsEl.innerHTML = `<p class="preview-loading">Loading rulings…</p>`;
+  const wantsCombos = combosApply(card);
+  previewCombosSectionEl.classList.toggle("hidden", !wantsCombos);
+  if (wantsCombos) previewCombosEl.innerHTML = `<p class="preview-loading">Checking combos…</p>`;
   previewEl.style.display = "flex";
   positionPreview(e);
 
-  const rulings = await fetchRulings(card);
-  if (myToken !== previewToken) return; // user moved to a different card meanwhile
-  renderRulings(rulings);
-  positionPreview();
+  // Rulings and combos load independently; each renders as soon as it arrives, unless the
+  // user has moved to a different card in the meantime.
+  fetchRulings(card).then((rulings) => {
+    if (myToken !== previewToken) return;
+    renderRulings(rulings);
+    positionPreview();
+  });
+  if (wantsCombos) {
+    fetchCombos(card).then((combos) => {
+      if (myToken !== previewToken) return;
+      renderCombos(combos, card);
+      positionPreview();
+    });
+  }
 }
 
 function positionPreview(e) {
@@ -920,63 +988,87 @@ function positionPreview(e) {
 }
 function hidePreview() {
   if (previewEl) previewEl.style.display = "none";
-  previewToken++; // invalidate any ruling fetch still in flight for the card just left
+  previewToken++; // invalidate any fetch still in flight for the card just left
 }
 
-function cardOracleText(card) {
-  return card.oracle_text || (card.card_faces ? card.card_faces.map((f) => f.oracle_text || "").join(" ") : "") || "";
+// ---------- Combos (Commander Spellbook, via our own /api/proxy) ----------
+//
+// Commander Spellbook blocks direct browser requests, so the lookup goes through the
+// serverless function in api/proxy.js. Where that function isn't available (for example
+// on a plain static file server), fetchCombos resolves to null and the Combos section
+// simply stays hidden — nothing else on the page depends on it.
+
+const comboCache = new Map(); // "card|colors" -> Promise<combo[] | null>
+
+// Spellbook lists double-faced cards by their full "A // B" name; we match on the front face.
+function frontFace(name) {
+  return name.split(" // ")[0];
 }
 
-// Best-effort, not exhaustive — just enough to surface an obvious shared theme
-// (e.g. both the commander and the card mention "proliferate" or "sacrifice").
-const SYNERGY_KEYWORDS = [
-  "proliferate", "sacrifice", "graveyard", "token", "artifact", "enchantment",
-  "counter", "draw a card", "exile", "lifelink", "deathtouch", "flying",
-  "landfall", "discard", "mill", "tutor", "treasure", "convoke", "storm",
-];
-function synergyKeywords(commander, card) {
-  const cText = cardOracleText(commander).toLowerCase();
-  const kText = cardOracleText(card).toLowerCase();
-  return SYNERGY_KEYWORDS.filter((k) => cText.includes(k) && kText.includes(k));
+function combosApply(card) {
+  return !!currentDeck && !/Basic Land/.test(card.type_line || "");
 }
 
-// Explains why a card is in the deck using the deck-builder's actual selection logic
-// (its functional category), not a guess — plus a lightweight keyword-overlap hint.
-// There's no backend/LLM here, so this stays rule-based rather than freeform analysis.
-function buildWhyText(card, groupName) {
-  if (!currentDeck) return "";
-  const commander = currentDeck.commander;
-  if (card.id && card.id === commander.id) {
-    const colors = commander.color_identity && commander.color_identity.length ? commander.color_identity.join("") : "colorless";
-    return `Your commander — its color identity (${colors}) and abilities set the whole game plan for this deck.`;
+function fetchCombos(card) {
+  const colors = (currentDeck.identity || []).join("");
+  const name = frontFace(card.name);
+  const key = `${name}|${colors}`;
+  if (!comboCache.has(key)) {
+    const promise = (async () => {
+      try {
+        const res = await fetch(`/api/proxy?target=spellbook&card=${encodeURIComponent(name)}&ci=${colors}`);
+        if (!res.ok) return null;
+        const data = await res.json();
+        return Array.isArray(data.combos) ? data.combos : null;
+      } catch {
+        return null;
+      }
+    })();
+    comboCache.set(key, promise);
+    promise.then((result) => {
+      if (result === null) comboCache.delete(key); // don't remember failures; retry on the next hover
+    });
   }
+  return comboCache.get(key);
+}
 
-  let base;
-  if (!groupName) {
-    base = "Not yet in your deck — drag this card into the deck to add it.";
-  } else if (groupName === "Ramp") {
-    base = `Included as Ramp, to accelerate you toward ${commander.name} and your bigger spells sooner.`;
-  } else if (groupName === "Removal") {
-    base = "Included as Removal, to answer a threatening creature, artifact, or enchantment an opponent controls.";
-  } else if (groupName === "Board Wipes") {
-    base = "Included as a Board Wipe, to reset the board when you're behind.";
-  } else if (groupName === "Card Draw") {
-    base = "Included for Card Draw, to keep your hand stocked with answers and threats.";
-  } else if (groupName.endsWith(" Synergy")) {
-    base = `Picked for the ${currentDeck.archetypeLabel} plan${currentDeck.archetypeDescription ? " — " + currentDeck.archetypeDescription : ""}`;
-  } else if (groupName === "Added Cards") {
-    base = "You added this card to the deck yourself.";
-  } else if (groupName === "Nonbasic Lands" || groupName === "Basic Lands") {
-    base = "Part of your mana base, providing colors this deck needs.";
-  } else {
-    base = `A strong general-purpose pick alongside ${commander.name}.`;
-  }
+// The fetched combos are cached per card, but which of them are complete is worked out
+// fresh on every hover, so it always reflects the deck as it is right now.
+function classifyCombos(combos, card) {
+  const have = new Set([frontFace(currentDeck.commander.name).toLowerCase(), frontFace(card.name).toLowerCase()]);
+  currentDeck.groups.forEach((g) => g.cards.forEach((c) => have.add(frontFace(c.name).toLowerCase())));
 
-  const overlap = synergyKeywords(commander, card);
-  if (overlap.length) {
-    base += ` It also shares a theme with ${commander.name}: ${overlap.slice(0, 2).join(" & ")}.`;
+  const complete = [];
+  const near = [];
+  for (const combo of combos) {
+    const missing = combo.cards.filter((n) => !have.has(frontFace(n).toLowerCase()));
+    if (missing.length === 0) complete.push(combo);
+    else if (missing.length === 1) near.push({ ...combo, missing: missing[0] });
   }
-  return base;
+  return { complete: complete.slice(0, 3), near: near.slice(0, 2) };
+}
+
+function comboHtml(combo, missing) {
+  const extra = combo.produces.length - 2;
+  const result = combo.produces.slice(0, 2).join(", ") + (extra > 0 ? ` +${extra} more` : "");
+  return `<div class="combo ${missing ? "combo-near" : "combo-complete"}">
+    <span class="combo-tag">${missing ? `Missing ${escapeHtml(missing)}` : "Complete"}</span>
+    <div class="combo-cards">${combo.cards.map(escapeHtml).join(" + ")}</div>
+    ${result ? `<div class="combo-result">${escapeHtml(result)}</div>` : ""}
+  </div>`;
+}
+
+function renderCombos(combos, card) {
+  if (combos === null) {
+    previewCombosSectionEl.classList.add("hidden");
+    return;
+  }
+  const { complete, near } = classifyCombos(combos, card);
+  if (!complete.length && !near.length) {
+    previewCombosEl.innerHTML = `<p class="preview-empty">No combos using this card with your current deck.</p>`;
+    return;
+  }
+  previewCombosEl.innerHTML = complete.map((c) => comboHtml(c, null)).join("") + near.map((c) => comboHtml(c, c.missing)).join("");
 }
 
 const rulingsCache = new Map();

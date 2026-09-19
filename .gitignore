@@ -1,0 +1,5 @@
+# Local tooling that the live site doesn't need
+serve.ps1
+deploy.ps1
+.claude/
+.vercel/

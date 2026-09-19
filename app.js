@@ -233,6 +233,24 @@ function escapeHtml(s) {
 
 // ---------- Commander selection ----------
 
+// Official mana symbols, hosted by Scryfall. Scryfall lists color identity alphabetically;
+// Magic's own order is W, U, B, R, G.
+const COLOR_NAMES = { W: "White", U: "Blue", B: "Black", R: "Red", G: "Green", C: "Colorless" };
+function renderColorSymbols(identity) {
+  const known = (identity || []).filter((c) => "WUBRG".includes(c));
+  const colors = known.length ? [...known].sort((a, b) => "WUBRG".indexOf(a) - "WUBRG".indexOf(b)) : ["C"];
+  const row = el("commander-colors");
+  row.innerHTML = "";
+  colors.forEach((c) => {
+    const img = document.createElement("img");
+    img.className = "mana-symbol";
+    img.src = `https://svgs.scryfall.io/card-symbols/${c}.svg`;
+    img.alt = COLOR_NAMES[c];
+    img.title = COLOR_NAMES[c];
+    row.appendChild(img);
+  });
+}
+
 function selectCommander(card) {
   selectedCommander = card;
   resultsBox.classList.add("hidden");
@@ -243,10 +261,7 @@ function selectCommander(card) {
   el("commander-type").textContent = card.type_line || "";
   el("commander-text").textContent = card.oracle_text || (card.card_faces ? card.card_faces.map((f) => f.oracle_text).join("\n---\n") : "");
 
-  const colors = card.color_identity && card.color_identity.length ? card.color_identity : ["C"];
-  el("commander-colors").innerHTML = colors
-    .map((c) => `<div class="pip pip-${c}">${c}</div>`)
-    .join("");
+  renderColorSymbols(card.color_identity);
 
   populateArchetypeSelect(card, []);
   el("commander-panel").classList.remove("hidden");

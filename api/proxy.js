@@ -69,7 +69,8 @@ async function archidekt(params) {
     .map((d) => ({
       id: d.id,
       name: String(d.name || "").slice(0, 120),
-      owner: (d.owner && d.owner.username) || "",
+      // Some Archidekt usernames are email addresses; don't republish those.
+      owner: d.owner && d.owner.username && !d.owner.username.includes("@") ? d.owner.username : "",
       views: d.viewCount || 0,
       bracket: d.edhBracket == null ? null : d.edhBracket,
       url: `https://archidekt.com/decks/${d.id}`,

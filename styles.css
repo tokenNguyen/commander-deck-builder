@@ -107,17 +107,7 @@ main {
 #commander-text { margin: 0 0 12px; font-size: 13px; line-height: 1.5; color: #cdd3db; white-space: pre-wrap; }
 
 .pip-row { display: flex; gap: 6px; margin-bottom: 14px; }
-.pip {
-  width: 26px; height: 26px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 13px; font-weight: 700; color: #14161a;
-}
-.pip-W { background: #f8f3d4; }
-.pip-U { background: #6bb3e8; }
-.pip-B { background: #a89cb0; }
-.pip-R { background: #e8977a; }
-.pip-G { background: #8fc28f; }
-.pip-C { background: #ccc; }
+.mana-symbol { width: 28px; height: 28px; display: block; }
 
 .archetype-row { margin-bottom: 16px; }
 .archetype-row label { display: block; font-size: 12px; color: #9aa4b2; margin-bottom: 6px; }

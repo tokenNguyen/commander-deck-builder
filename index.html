@@ -74,7 +74,7 @@
       <div class="add-card-panel">
         <label for="add-card-input">Add cards to this deck</label>
         <input type="text" id="add-card-input" placeholder="Search for a card by name..." autocomplete="off" />
-        <p class="add-card-hint">Drag a result into the deck below to add it. Click and drag any card in the deck to remove it.</p>
+        <p class="add-card-hint">Drag a result into the deck below to add it. Drag a card in the deck to the Graveyard to remove it. Click any card for its rulings, combos and replacement ideas.</p>
         <div id="add-card-results" class="card-grid add-card-results"></div>
       </div>
 
@@ -85,6 +85,23 @@
   <footer>
     <p>Card data &amp; images from <a href="https://scryfall.com" target="_blank" rel="noopener">Scryfall</a>. Categories built from community oracle tags + EDHREC popularity rank. Combos from <a href="https://commanderspellbook.com" target="_blank" rel="noopener">Commander Spellbook</a>; deck links from <a href="https://archidekt.com" target="_blank" rel="noopener">Archidekt</a>. Not affiliated with Wizards of the Coast.</p>
   </footer>
+
+  <div id="card-modal" class="modal-backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <button type="button" id="modal-close" class="modal-close" aria-label="Close">&times;</button>
+      <img id="modal-img" class="modal-img" alt="" />
+      <div class="modal-side">
+        <h3 id="modal-title"></h3>
+        <p id="modal-sub" class="modal-sub"></p>
+        <div class="modal-tabs" role="tablist">
+          <button type="button" role="tab" class="toggle-btn modal-tab active" data-tab="rulings" aria-selected="true">Rulings</button>
+          <button type="button" role="tab" class="toggle-btn modal-tab" data-tab="combos" aria-selected="false">Combos</button>
+          <button type="button" role="tab" class="toggle-btn modal-tab" data-tab="replacements" aria-selected="false">Replacements</button>
+        </div>
+        <div id="modal-panel" class="modal-panel" role="tabpanel" aria-live="polite"></div>
+      </div>
+    </div>
+  </div>
 
 <script src="app.js"></script>
 </body>

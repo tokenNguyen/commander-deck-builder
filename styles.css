@@ -384,46 +384,69 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .toast.show { opacity: 1; }
 
-.card-preview {
+/* Card details window: sits over the page with a dimmed (not opaque) backdrop so the deck stays visible behind it. */
+.modal-backdrop {
   position: fixed;
-  z-index: 50;
-  pointer-events: none;
-  display: none;
-  align-items: flex-start;
-  gap: 14px;
-  max-width: 560px;
+  inset: 0;
+  z-index: 65;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 10, 13, 0.62);
 }
-.preview-img {
-  width: 220px;
-  aspect-ratio: 63 / 88;
-  object-fit: cover;
-  border-radius: 14px;
-  box-shadow: 0 16px 40px rgba(0,0,0,0.6);
-  flex-shrink: 0;
-  background: #0f1216;
-}
-.preview-info {
-  width: 300px;
-  max-height: 460px;
+.modal {
+  position: relative;
+  display: flex;
+  gap: 26px;
+  width: min(940px, 100%);
+  max-height: calc(100vh - 48px);
+  padding: 24px;
   background: #1a1f27;
   border: 1px solid #2c3340;
-  border-radius: 12px;
-  padding: 14px;
-  box-shadow: 0 16px 40px rgba(0,0,0,0.6);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  overflow: hidden;
+  border-radius: 16px;
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.65);
 }
-.preview-info h4 {
-  margin: 0 0 6px;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: #d7b56d;
+.modal-img {
+  /* Big, but never taller than the window can show. */
+  width: min(340px, calc((100vh - 100px) * 63 / 88));
+  aspect-ratio: 63 / 88;
+  object-fit: cover;
+  align-self: flex-start;
+  flex-shrink: 0;
+  border-radius: 16px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+  background: #0f1216;
 }
-.preview-combos { flex-shrink: 0; }
-.combo { font-size: 12px; line-height: 1.4; color: #cdd3db; border-top: 1px solid #232a35; padding-top: 8px; margin-top: 8px; }
+.modal-side { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.modal-side h3 { margin: 0 44px 2px 0; font-size: 22px; }
+.modal-sub { margin: 0 0 16px; font-size: 13px; color: #9aa4b2; }
+.modal-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.modal-panel { flex: 1; min-height: 0; overflow-y: auto; padding-right: 6px; }
+.modal-note { margin: 0 0 14px; font-size: 13px; color: #6b7280; font-style: italic; }
+.modal-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid #2c3340;
+  background: transparent;
+  color: #9aa4b2;
+  font-size: 22px;
+  line-height: 1;
+}
+.modal-close:hover { color: #e8ebf0; border-color: #3a424f; }
+
+.suggestion-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 14px; }
+.suggestion img,
+.suggestion .art-missing { display: block; width: 100%; aspect-ratio: 63 / 88; object-fit: cover; border-radius: 8px; background: #0f1216; }
+.suggestion-name { margin-top: 6px; font-size: 12px; line-height: 1.3; color: #cdd3db; }
+.swap-btn { width: 100%; margin-top: 6px; padding: 6px 8px; font-size: 12px; }
+
+.combo { font-size: 13px; line-height: 1.45; color: #cdd3db; border-top: 1px solid #232a35; padding-top: 12px; margin-top: 12px; }
 .combo:first-child { border-top: none; padding-top: 0; margin-top: 0; }
 .combo-tag {
   display: inline-block;
@@ -439,12 +462,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .combo-near .combo-tag { background: rgba(215, 181, 109, 0.16); color: #d7b56d; }
 .combo-cards { color: #e8ebf0; }
 .combo-result { margin-top: 2px; color: #9aa4b2; }
-.preview-rulings { overflow-y: auto; min-height: 0; }
-.preview-rulings-list { display: flex; flex-direction: column; gap: 10px; }
-.ruling { font-size: 12px; line-height: 1.45; color: #cdd3db; border-top: 1px solid #232a35; padding-top: 8px; }
-.ruling:first-child { border-top: none; padding-top: 0; }
-.ruling-date { display: block; font-size: 10px; color: #6b7280; margin-bottom: 2px; }
-.preview-loading, .preview-empty { margin: 0; font-size: 12px; color: #6b7280; font-style: italic; }
+.ruling { font-size: 13px; line-height: 1.5; color: #cdd3db; border-top: 1px solid #232a35; padding-top: 12px; margin-top: 12px; }
+.ruling:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+.ruling-date { display: block; font-size: 11px; color: #6b7280; margin-bottom: 2px; }
 
 footer {
   text-align: center;
@@ -482,12 +502,12 @@ footer a { color: #9aa4b2; }
 
   .view-toggle { flex-wrap: wrap; }
 
-  .card-preview {
-    flex-direction: column;
-    max-width: calc(100vw - 24px);
-  }
-  .preview-img { width: 100%; max-width: 220px; margin: 0 auto; }
-  .preview-info { width: 100%; max-height: 42vh; }
+  .modal-backdrop { padding: 12px; }
+  .modal { flex-direction: column; gap: 14px; padding: 16px; overflow-y: auto; }
+  .modal-img { width: min(210px, 52vw); align-self: center; }
+  .modal-side h3 { margin-right: 0; }
+  .modal-panel { overflow: visible; flex: none; padding-right: 0; }
+  .suggestion-grid { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; }
 
   .toast { max-width: calc(100vw - 32px); text-align: center; }
 }

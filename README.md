@@ -18,9 +18,13 @@ the [Scryfall API](https://scryfall.com/docs/api). One small serverless function
 
    Everything is sorted by EDHREC popularity rank, so you get real, playable staples
    rather than random cards. **Rebuild** reruns the same pipeline for fresh picks.
-4. Hover any card for a full-size preview with its combos and official rulings.
-   **Copy Decklist** copies a plain text list (works with Moxfield, Archidekt,
-   TappedOut, etc.).
+4. Click any card to open a details window over the page (the deck stays visible,
+   dimmed, behind it) with a large image and three tabs: official **Rulings**,
+   **Combos** from Commander Spellbook, and **Replacements**, other popular cards for
+   the same job that aren't in your deck yet, with a **Swap in** button that puts the
+   new card in the old one's slot. Drag cards to add or remove them (see the hint
+   above the deck). **Copy Decklist** copies a plain text list (works with Moxfield,
+   Archidekt, TappedOut, etc.).
 
 ## The serverless proxy (`api/proxy.js`)
 

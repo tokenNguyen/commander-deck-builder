@@ -869,7 +869,7 @@ function renderDeck(deck) {
     const grid = document.createElement("div");
     grid.className = "card-grid";
     dg.entries.forEach((entry) => {
-      const tile = cardTile(entry.card, entry.qty);
+      const tile = cardTile(entry.card, entry.qty, { group: entry.group, index: entry.index });
       makeRemovable(tile, entry.group, entry.index);
       grid.appendChild(tile);
     });
@@ -884,8 +884,11 @@ function renderDeck(deck) {
 }
 
 // Renders an actual card image (not a text row) for every card, including basic lands
-// once their art has been fetched in buildDeck's balancing step.
-function cardTile(card, qty) {
+// once their art has been fetched in buildDeck's balancing step. `ctx` ({group, index}) says
+// where a deck card lives so the details window can offer to swap it; it's left out for the
+// commander and for search results.
+let suppressClickUntil = 0; // a touch drag can end with a stray click on the tile; ignore it
+function cardTile(card, qty, ctx) {
   const tile = document.createElement("div");
   tile.className = "card-tile";
   tile.title = card.name;
@@ -908,9 +911,10 @@ function cardTile(card, qty) {
     badge.textContent = `×${qty}`;
     tile.appendChild(badge);
   }
-  tile.addEventListener("mouseenter", (e) => showPreview(card, e));
-  tile.addEventListener("mousemove", positionPreview);
-  tile.addEventListener("mouseleave", hidePreview);
+  tile.addEventListener("click", () => {
+    if (Date.now() < suppressClickUntil) return;
+    openCardModal(card, ctx);
+  });
   return tile;
 }
 
@@ -921,97 +925,220 @@ function missingArtLabel(name) {
   return label;
 }
 
-// ---------- Hover preview: enlarged card + combos + live Scryfall rulings ----------
+// ---------- Card details window: big card + Rulings / Combos / Replacements tabs ----------
+//
+// Clicking any card opens this on top of the page, dimming (not hiding) the deck behind it.
 
-let previewEl = null;
-let previewImgEl = null;
-let previewCombosSectionEl = null;
-let previewCombosEl = null;
-let previewRulingsEl = null;
-let previewToken = 0; // invalidates stale async fetches when the hover target changes
-let lastMouseX = 0;
-let lastMouseY = 0;
+const modalEl = el("card-modal");
+const modalPanelEl = el("modal-panel");
+let modalState = null; // { card, ctx, tab, token, opener } while open
+let modalToken = 0; // lets slow lookups notice the window has moved on to another card or tab
 
-function ensurePreviewEl() {
-  if (previewEl) return;
-  previewEl = document.createElement("div");
-  previewEl.className = "card-preview";
-  previewEl.innerHTML = `
-    <img class="preview-img" alt="" />
-    <div class="preview-info">
-      <div class="preview-combos hidden">
-        <h4>Combos</h4>
-        <div class="preview-combos-list"></div>
-      </div>
-      <div class="preview-rulings">
-        <h4>Rulings</h4>
-        <div class="preview-rulings-list"></div>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(previewEl);
-  previewImgEl = previewEl.querySelector(".preview-img");
-  previewCombosSectionEl = previewEl.querySelector(".preview-combos");
-  previewCombosEl = previewEl.querySelector(".preview-combos-list");
-  previewRulingsEl = previewEl.querySelector(".preview-rulings-list");
+const modalNote = (text) => `<p class="modal-note">${escapeHtml(text)}</p>`;
+
+function openCardModal(card, ctx) {
+  const art = cardArt(card, "large") || cardArt(card, "normal") || cardArt(card, "small");
+  const isBasic = /Basic Land/.test(card.type_line || "");
+  const canReplace = !!ctx && !isBasic && !ctx.group.isBasics && ctx.group.cards[ctx.index] === card;
+  const isCommander = !!currentDeck && card.id === currentDeck.commander.id;
+
+  modalState = { card, ctx, canReplace, tab: "rulings", token: ++modalToken, opener: document.activeElement };
+
+  const img = el("modal-img");
+  img.classList.toggle("hidden", !art);
+  img.src = art || "";
+  img.alt = card.name;
+  el("modal-title").textContent = card.name;
+  el("modal-sub").textContent = [card.type_line, isCommander ? "Commander" : ctx && ctx.group.name].filter(Boolean).join(" · ");
+  modalEl.querySelector('[data-tab="combos"]').classList.toggle("hidden", !combosApply(card));
+  modalEl.querySelector('[data-tab="replacements"]').classList.toggle("hidden", !canReplace);
+
+  modalEl.classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+  showModalTab("rulings");
+  el("modal-close").focus();
 }
 
-function showPreview(card, e) {
-  const art = cardArt(card, "normal") || cardArt(card, "small");
-  if (!art) return;
-  ensurePreviewEl();
-  const myToken = ++previewToken;
+function closeCardModal() {
+  if (!modalState) return;
+  const opener = modalState.opener;
+  modalState = null;
+  modalToken++;
+  modalEl.classList.add("hidden");
+  document.body.style.overflow = "";
+  if (opener && document.contains(opener)) opener.focus();
+}
 
-  previewImgEl.src = art;
-  previewImgEl.alt = card.name;
-  previewRulingsEl.innerHTML = `<p class="preview-loading">Loading rulings…</p>`;
-  const wantsCombos = combosApply(card);
-  previewCombosSectionEl.classList.toggle("hidden", !wantsCombos);
-  if (wantsCombos) previewCombosEl.innerHTML = `<p class="preview-loading">Checking combos…</p>`;
-  previewEl.style.display = "flex";
-  positionPreview(e);
+function showModalTab(tab) {
+  if (!modalState) return;
+  modalState.tab = tab;
+  const { card, ctx, token } = modalState;
+  const live = () => modalState && modalState.token === token && modalState.tab === tab;
 
-  // Rulings and combos load independently; each renders as soon as it arrives, unless the
-  // user has moved to a different card in the meantime.
-  fetchRulings(card).then((rulings) => {
-    if (myToken !== previewToken) return;
-    renderRulings(rulings);
-    positionPreview();
+  modalEl.querySelectorAll(".modal-tab").forEach((b) => {
+    const active = b.dataset.tab === tab;
+    b.classList.toggle("active", active);
+    b.setAttribute("aria-selected", String(active));
   });
-  if (wantsCombos) {
-    fetchCombos(card).then((combos) => {
-      if (myToken !== previewToken) return;
-      renderCombos(combos, card);
-      positionPreview();
+  modalPanelEl.scrollTop = 0;
+
+  if (tab === "rulings") {
+    modalPanelEl.innerHTML = modalNote("Loading rulings…");
+    fetchRulings(card).then((rulings) => live() && renderRulings(rulings));
+  } else if (tab === "combos") {
+    modalPanelEl.innerHTML = modalNote("Checking combos…");
+    fetchCombos(card).then((combos) => live() && renderCombos(combos, card));
+  } else {
+    modalPanelEl.innerHTML = modalNote("Finding replacements…");
+    fetchReplacements(card, ctx).then((result) => live() && renderReplacements(result, card, ctx));
+  }
+}
+
+modalEl.addEventListener("click", (e) => {
+  if (e.target === modalEl) closeCardModal(); // a click on the dimmed area outside the window
+});
+el("modal-close").addEventListener("click", closeCardModal);
+modalEl.querySelectorAll(".modal-tab").forEach((b) => b.addEventListener("click", () => showModalTab(b.dataset.tab)));
+document.addEventListener("keydown", (e) => {
+  if (!modalState) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeCardModal();
+  } else if (e.key === "Tab") {
+    // Keep keyboard focus inside the window while it's open.
+    const focusable = [...modalEl.querySelectorAll("button")].filter((b) => b.offsetParent !== null);
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!modalEl.contains(document.activeElement)) {
+      e.preventDefault();
+      first.focus();
+    } else if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+});
+
+// ---------- Replacements ----------
+//
+// Suggests other popular cards for the same job as the one you clicked, using the same
+// searches that built the deck: the role tag for ramp/removal/wipes/draw, land search for
+// lands, and otherwise the same card type at a similar mana cost. Cards already in the deck
+// are left out, and "Swap in" puts the new card exactly where the old one was.
+
+const ROLE_TAG = { Ramp: "otag:ramp", Removal: "otag:removal", "Board Wipes": "otag:board-wipe", "Card Draw": "otag:card-advantage" };
+const TYPE_QUERY = {
+  Creatures: "t:creature",
+  Planeswalkers: "t:planeswalker",
+  Battles: "t:battle",
+  Instants: "t:instant",
+  Sorceries: "t:sorcery",
+  Artifacts: "t:artifact -t:creature",
+  Enchantments: "t:enchantment -t:creature",
+};
+
+function replacementSearch(card, ctx) {
+  const idFrag = identityQueryFragment(currentDeck.identity);
+  const base = `${idFrag} legal:commander -is:commander game:paper`;
+  const role = ctx.group.name;
+  if (ROLE_TAG[role]) return { query: `${base} ${ROLE_TAG[role]} order:edhrec`, label: role.toLowerCase() };
+
+  const category = cardTypeCategory(card);
+  if (role === "Nonbasic Lands" || category === "Lands") {
+    return { query: `${idFrag} legal:commander t:land -t:basic game:paper order:edhrec`, label: "lands", landsOnly: true };
+  }
+  if (!TYPE_QUERY[category]) return null;
+  const cmc = Math.floor(cardCmc(card));
+  return {
+    query: `${base} ${TYPE_QUERY[category]} cmc>=${Math.max(0, cmc - 1)} cmc<=${cmc + 1} order:edhrec`,
+    label: `${category.toLowerCase()} at a similar cost`,
+  };
+}
+
+const replacementCache = new Map(); // search query -> Promise<card[] | null>
+function fetchReplacements(card, ctx) {
+  const search = replacementSearch(card, ctx);
+  if (!search) return Promise.resolve({ label: "", cards: [] });
+  if (!replacementCache.has(search.query)) {
+    const promise = scryfallSearch(search.query, { limit: 60 }).catch(() => null);
+    replacementCache.set(search.query, promise);
+    promise.then((pool) => {
+      if (pool === null) replacementCache.delete(search.query); // don't remember failures
     });
   }
+  return replacementCache.get(search.query).then((pool) => {
+    if (pool === null) return null;
+    // Filtered fresh each time, so the list reflects the deck as it is right now.
+    const usable = pool.filter(
+      (c) => !deckHasCard(currentDeck, c.name) && (!search.landsOnly || isLandRelevant(c, currentDeck.identity))
+    );
+    return { label: search.label, cards: usable.slice(0, 8) };
+  });
 }
 
-function positionPreview(e) {
-  if (e) {
-    lastMouseX = e.clientX;
-    lastMouseY = e.clientY;
+function renderReplacements(result, card, ctx) {
+  if (result === null) {
+    modalPanelEl.innerHTML = modalNote("Couldn't load replacement ideas right now.");
+    return;
   }
-  if (!previewEl) return;
-  const rect = previewEl.getBoundingClientRect();
-  const w = rect.width || 540;
-  const h = rect.height || 300;
-  const x = Math.max(12, Math.min(lastMouseX + 20, window.innerWidth - w - 12));
-  const y = Math.max(12, Math.min(lastMouseY + 20, window.innerHeight - h - 12));
-  previewEl.style.left = x + "px";
-  previewEl.style.top = y + "px";
+  if (!result.cards.length) {
+    modalPanelEl.innerHTML = modalNote("No other suggestions found for this card's role.");
+    return;
+  }
+  modalPanelEl.innerHTML = modalNote(`Other popular ${result.label} not in your deck yet. Swapping puts the new card where ${card.name} is now.`);
+  const grid = document.createElement("div");
+  grid.className = "suggestion-grid";
+  result.cards.forEach((c) => {
+    const item = document.createElement("div");
+    item.className = "suggestion";
+    const art = cardArt(c, "normal") || cardArt(c, "small");
+    if (art) {
+      const img = document.createElement("img");
+      img.src = art;
+      img.alt = c.name;
+      item.appendChild(img);
+    } else {
+      item.appendChild(missingArtLabel(c.name));
+    }
+    const name = document.createElement("div");
+    name.className = "suggestion-name";
+    name.textContent = c.name;
+    const swap = document.createElement("button");
+    swap.type = "button";
+    swap.className = "secondary swap-btn";
+    swap.textContent = "Swap in";
+    swap.setAttribute("aria-label", `Swap ${card.name} for ${c.name}`);
+    swap.addEventListener("click", () => swapCard(ctx, card, c));
+    item.append(name, swap);
+    grid.appendChild(item);
+  });
+  modalPanelEl.appendChild(grid);
 }
-function hidePreview() {
-  if (previewEl) previewEl.style.display = "none";
-  previewToken++; // invalidate any fetch still in flight for the card just left
+
+function swapCard(ctx, oldCard, newCard) {
+  if (!currentDeck || ctx.group.cards[ctx.index] !== oldCard) {
+    showToast("The deck changed — close this window and try again.");
+    return;
+  }
+  if (deckHasCard(currentDeck, newCard.name)) {
+    showToast(`${newCard.name} is already in the deck.`);
+    return;
+  }
+  ctx.group.cards[ctx.index] = newCard;
+  closeCardModal();
+  showToast(`Swapped ${oldCard.name} for ${newCard.name}.`);
+  renderDeck(currentDeck);
 }
 
 // ---------- Combos (Commander Spellbook, via our own /api/proxy) ----------
 //
 // Commander Spellbook blocks direct browser requests, so the lookup goes through the
 // serverless function in api/proxy.js. Where that function isn't available (for example
-// on a plain static file server), fetchCombos resolves to null and the Combos section
-// simply stays hidden — nothing else on the page depends on it.
+// on a plain static file server), fetchCombos resolves to null and the Combos tab says
+// so — nothing else on the page depends on it.
 
 const comboCache = new Map(); // "card|colors" -> Promise<combo[] | null>
 
@@ -1041,14 +1168,14 @@ function fetchCombos(card) {
     })();
     comboCache.set(key, promise);
     promise.then((result) => {
-      if (result === null) comboCache.delete(key); // don't remember failures; retry on the next hover
+      if (result === null) comboCache.delete(key); // don't remember failures; retry next time
     });
   }
   return comboCache.get(key);
 }
 
 // The fetched combos are cached per card, but which of them are complete is worked out
-// fresh on every hover, so it always reflects the deck as it is right now.
+// fresh each time the tab is shown, so it always reflects the deck as it is right now.
 function classifyCombos(combos, card) {
   const have = new Set([frontFace(currentDeck.commander.name).toLowerCase(), frontFace(card.name).toLowerCase()]);
   currentDeck.groups.forEach((g) => g.cards.forEach((c) => have.add(frontFace(c.name).toLowerCase())));
@@ -1060,12 +1187,12 @@ function classifyCombos(combos, card) {
     if (missing.length === 0) complete.push(combo);
     else if (missing.length === 1) near.push({ ...combo, missing: missing[0] });
   }
-  return { complete: complete.slice(0, 3), near: near.slice(0, 2) };
+  return { complete: complete.slice(0, 6), near: near.slice(0, 6) };
 }
 
 function comboHtml(combo, missing) {
-  const extra = combo.produces.length - 2;
-  const result = combo.produces.slice(0, 2).join(", ") + (extra > 0 ? ` +${extra} more` : "");
+  const extra = combo.produces.length - 3;
+  const result = combo.produces.slice(0, 3).join(", ") + (extra > 0 ? ` +${extra} more` : "");
   return `<div class="combo ${missing ? "combo-near" : "combo-complete"}">
     <span class="combo-tag">${missing ? `Missing ${escapeHtml(missing)}` : "Complete"}</span>
     <div class="combo-cards">${combo.cards.map(escapeHtml).join(" + ")}</div>
@@ -1075,15 +1202,15 @@ function comboHtml(combo, missing) {
 
 function renderCombos(combos, card) {
   if (combos === null) {
-    previewCombosSectionEl.classList.add("hidden");
+    modalPanelEl.innerHTML = modalNote("Combo lookup isn't available right now.");
     return;
   }
   const { complete, near } = classifyCombos(combos, card);
   if (!complete.length && !near.length) {
-    previewCombosEl.innerHTML = `<p class="preview-empty">No combos using this card with your current deck.</p>`;
+    modalPanelEl.innerHTML = modalNote("No combos using this card with your current deck.");
     return;
   }
-  previewCombosEl.innerHTML = complete.map((c) => comboHtml(c, null)).join("") + near.map((c) => comboHtml(c, c.missing)).join("");
+  modalPanelEl.innerHTML = complete.map((c) => comboHtml(c, null)).join("") + near.map((c) => comboHtml(c, c.missing)).join("");
 }
 
 const rulingsCache = new Map();
@@ -1105,16 +1232,12 @@ async function fetchRulings(card) {
 
 function renderRulings(rulings) {
   if (!rulings.length) {
-    previewRulingsEl.innerHTML = `<p class="preview-empty">No official rulings for this card.</p>`;
+    modalPanelEl.innerHTML = modalNote("No official rulings for this card.");
     return;
   }
-  const shown = rulings.slice(0, 5);
-  const remainder = rulings.length - shown.length;
-  previewRulingsEl.innerHTML =
-    shown
-      .map((r) => `<div class="ruling"><span class="ruling-date">${escapeHtml(r.published_at)}</span>${escapeHtml(r.comment)}</div>`)
-      .join("") +
-    (remainder > 0 ? `<p class="preview-empty">+${remainder} more ruling${remainder === 1 ? "" : "s"} on Scryfall.</p>` : "");
+  modalPanelEl.innerHTML = rulings
+    .map((r) => `<div class="ruling"><span class="ruling-date">${escapeHtml(r.published_at)}</span>${escapeHtml(r.comment)}</div>`)
+    .join("");
 }
 
 function renderCurve(deck) {
@@ -1237,6 +1360,7 @@ function attachLongPressDrag(tile, { onStart, onMove, onDrop, onCancel }) {
       document.removeEventListener("pointerup", up);
       document.removeEventListener("pointercancel", cancelHandler);
       if (dragging) {
+        suppressClickUntil = Date.now() + 600; // the finger lifting can register as a click on the tile
         if (cancelled) onCancel && onCancel();
         else onDrop(ev);
       }
@@ -1273,7 +1397,6 @@ function makeRemovable(tile, group, idx) {
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", "remove");
     tile.classList.add("dragging");
-    hidePreview();
     spawnGraveyardZone(tile);
   });
   tile.addEventListener("dragend", () => {
@@ -1296,7 +1419,6 @@ function makeRemovable(tile, group, idx) {
     onStart: (e) => {
       dragState = { type: "remove", group, index: idx };
       tile.classList.add("dragging");
-      hidePreview();
       spawnGraveyardZone(tile);
       touchGhost = createTouchGhost(tile, e);
     },
@@ -1411,7 +1533,6 @@ function makeAddable(tile, card) {
     e.dataTransfer.effectAllowed = "copy";
     e.dataTransfer.setData("text/plain", "add");
     tile.classList.add("dragging");
-    hidePreview();
   });
   tile.addEventListener("dragend", () => {
     tile.classList.remove("dragging");
@@ -1432,7 +1553,6 @@ function makeAddable(tile, card) {
     onStart: (e) => {
       dragState = { type: "add", card };
       tile.classList.add("dragging");
-      hidePreview();
       touchGhost = createTouchGhost(tile, e);
     },
     onMove: (e) => {

@@ -51,7 +51,13 @@ the [Scryfall API](https://scryfall.com/docs/api). One small serverless function
    allow. Each is replaced in place by a popular card for the same job (the same search the
    Replacements tab uses) that has none of those traits, so the deck stays the same size.
    A note previews how many cards would change, "See what changed" lists every swap, and
-   **Undo** restores the deck until you make another edit. It only lowers a deck.
+   **Undo** restores the deck until you make another edit.
+
+   It also works upward: drag it higher and the deck brings in Game Changers (enough for
+   3 in Bracket 3, or 6 in Bracket 4), the most popular ones for the deck's colors. Each goes
+   into the group that matches its job (Ramp, Removal, Card Draw, ...) in place of that
+   group's least popular card; ones with no matching group replace the least popular
+   "Creatures & Other Spells" card. Cards you added and the basic lands are left alone.
 
 ## The serverless proxy (`api/proxy.js`)
 

@@ -1571,7 +1571,8 @@ async function fetchBracketCombos(deck, key) {
 // kept longest), mass land denial, extra-turn spells beyond two, and one card from each
 // two-card combo the target doesn't allow. Each card is replaced in place with a popular card
 // for the same job that has none of those problems, so the deck stays at 100. Bracket 4 has no
-// limits, so there is nothing to remove for it, and raising a deck's bracket isn't offered.
+// limits, so there is nothing to remove for it. Dragging the slider up instead brings Game
+// Changers in (see runRaise).
 
 const bracketSlider = el("bracket-slider");
 const bracketApplyBtn = el("bracket-apply");
@@ -1584,6 +1585,7 @@ const REASON_LABEL = {
   mld: ["mass land denial card", "mass land denial cards"],
   xt: ["extra-turn spell", "extra-turn spells"],
   combo: ["card from a two-card combo", "cards from two-card combos"],
+  raise: ["Game Changer brought in", "Game Changers brought in"],
 };
 const plural = (n, [one, many]) => `${n} ${n === 1 ? one : many}`;
 
@@ -1697,16 +1699,105 @@ async function runAdjustment(deck, target, onProgress = () => {}) {
   return { swaps, stuck: [...stuck], comboChecked, failed };
 }
 
+// Going up a bracket means bringing in Game Changers: enough to hold 3 for Bracket 3, or 6 for
+// Bracket 4 (which starts at 4). The most popular ones for the deck's colors come first, each
+// into the group that matches its job (Ramp, Removal, ...), taking the place of that group's
+// least popular card. Anything without a matching group replaces the least popular flex card.
+// Cards you added yourself and the basic lands are never touched.
+const RAISE_GOAL = { 3: 3, 4: 6 };
+
+async function runRaise(deck, target, onProgress = () => {}) {
+  const swaps = [];
+  let failed = false;
+  const gcCount = () => [deck.commander, ...deck.groups.flatMap((g) => g.cards)].filter((c) => c.game_changer).length;
+  const need = (RAISE_GOAL[target] || 0) - gcCount();
+  if (need <= 0) return { swaps, stuck: [], comboChecked: true, failed };
+
+  try {
+    onProgress("Finding Game Changers…");
+    const base = `${identityQueryFragment(deck.identity)} legal:commander -is:commander game:paper`;
+    const pool = await searchPool(`${base} is:gamechanger order:edhrec`);
+    if (!pool) throw new Error("Game Changer search failed");
+    const usable = pool.filter(
+      (c) =>
+        !deckHasCard(deck, c.name) && !isExtraTurnCard(c) && !MASS_LAND_DENIAL.has(frontFace(c.name).toLowerCase()) &&
+        isLandRelevant(c, deck.identity)
+    );
+
+    // Which group each Game Changer belongs in: the same role tags, limited to Game Changers.
+    const roleOf = new Map();
+    for (const [group, tag] of Object.entries(ROLE_TAG)) {
+      const rolePool = await searchPool(`${base} ${tag} is:gamechanger order:edhrec`);
+      (rolePool || []).forEach((c) => {
+        if (!roleOf.has(c.name)) roleOf.set(c.name, group);
+      });
+    }
+
+    // The cards each group could give up, least popular first.
+    const leastPopular = (a, b) => (b.card.edhrec_rank ?? 1e9) - (a.card.edhrec_rank ?? 1e9);
+    const slotsByGroup = new Map();
+    const flex = []; // groups that aren't tied to a role
+    deck.groups.forEach((group) => {
+      if (group.isBasics || group.isAdded) return;
+      const slots = group.cards.map((card, index) => ({ card, group, index })).filter((e) => !e.card.game_changer);
+      slots.sort(leastPopular);
+      slotsByGroup.set(group.name, slots);
+      if (!ROLE_TAG[group.name] && group.name !== "Nonbasic Lands") flex.push(...slots);
+    });
+    flex.sort(leastPopular);
+    const spent = new Set();
+    const take = (slots) => {
+      const slot = (slots || []).find((s) => !spent.has(s));
+      if (slot) spent.add(slot);
+      return slot;
+    };
+
+    let added = 0;
+    for (const gc of usable) {
+      if (added >= need) break;
+      const isLand = /Land/.test(gc.type_line || "");
+      const home = isLand ? "Nonbasic Lands" : roleOf.get(gc.name);
+      const slot = take(slotsByGroup.get(home)) || (isLand ? null : take(flex));
+      if (!slot) continue;
+      slot.group.cards[slot.index] = gc;
+      swaps.push({ from: slot.card, to: gc, reason: "raise" });
+      added++;
+    }
+  } catch {
+    failed = true;
+  }
+  return { swaps, stuck: [], comboChecked: true, failed };
+}
+
 async function adjustDeckToBracket(deck, target) {
-  if (adjustBusy || !deck || target >= 4) return;
+  if (adjustBusy || !deck) return;
+  const raising = !!adjustView && target > adjustView.est.bracket;
+  if (!raising && target >= 4) return;
   adjustBusy = true;
   clearAdjustResult();
   refreshAdjustControls();
 
   const snapshot = deck.groups.map((g) => g.cards.slice());
-  const { swaps, stuck, comboChecked, failed } = await runAdjustment(deck, target, (text) => {
+  const progress = (text) => {
     bracketNoteEl.textContent = text;
-  });
+  };
+  let result;
+  if (raising) {
+    result = await runRaise(deck, target, progress);
+    if (target < 4) {
+      // Bracket 3 still has limits (no fast combos and so on), and a new card might break one.
+      const fix = await runAdjustment(deck, target, progress);
+      result = {
+        swaps: [...result.swaps, ...fix.swaps],
+        stuck: fix.stuck,
+        comboChecked: fix.comboChecked,
+        failed: result.failed || fix.failed,
+      };
+    }
+  } else {
+    result = await runAdjustment(deck, target, progress);
+  }
+  const { swaps, stuck, comboChecked, failed } = result;
 
   adjustBusy = false;
   sliderTouched = false;
@@ -1731,7 +1822,7 @@ function showAdjustResult(deck, target, swaps, stuck, comboChecked, failed, buil
     const fixed = swaps.length ? ` ${plural(swaps.length, ["card was", "cards were"])} then swapped to break up a two-card combo.` : "";
     lines.push(`<p>Built to fit Bracket ${target}.${fixed}</p>`);
   } else if (swaps.length) {
-    const now = est ? ` The deck now reads as Bracket ${est.bracket}${est.bracket > target ? `, not Bracket ${target}` : ""}.` : "";
+    const now = est ? ` The deck now reads as Bracket ${est.bracket}${est.bracket !== target ? `, not Bracket ${target}` : ""}.` : "";
     lines.push(`<p>Replaced ${plural(swaps.length, ["card", "cards"])}.${now}</p>`);
   } else {
     lines.push("<p>No cards were changed.</p>");
@@ -1742,6 +1833,8 @@ function showAdjustResult(deck, target, swaps, stuck, comboChecked, failed, buil
   if (est && est.bracket > target) {
     if (est.why.length) warn(`Still held at Bracket ${est.bracket} by ${est.why[0].text}.`);
     if (deck.commander.game_changer) warn("The commander itself is a Game Changer, and it can't be swapped out.");
+  } else if (est && est.bracket < target) {
+    warn(`Only reached Bracket ${est.bracket}: not enough suitable Game Changers were found for this deck's colors.`);
   }
   if (!comboChecked) warn("Two-card combos couldn't be checked, so those weren't adjusted.");
   if (swaps.length) {
@@ -1782,10 +1875,11 @@ function refreshAdjustControls() {
   const { deck, est, comboInfo } = adjustView;
   const target = Number(bracketSlider.value);
   const lower = target < est.bracket;
+  const higher = target > est.bracket;
   bracketSlider.disabled = adjustBusy;
   bracketSlider.setAttribute("aria-valuetext", `Bracket ${target}, ${BRACKET_NAMES[target]}`);
-  bracketApplyBtn.disabled = adjustBusy || !lower;
-  bracketApplyBtn.textContent = adjustBusy ? "Adjusting…" : lower ? `Adjust deck to Bracket ${target}` : "Adjust deck";
+  bracketApplyBtn.disabled = adjustBusy || !(lower || higher);
+  bracketApplyBtn.textContent = adjustBusy ? "Adjusting…" : lower || higher ? `Adjust deck to Bracket ${target}` : "Adjust deck";
   if (adjustBusy) return;
 
   if (lower) {
@@ -1793,10 +1887,14 @@ function refreshAdjustControls() {
     bracketNoteEl.textContent = plan.length
       ? `This would replace ${plural(plan.length, ["card", "cards"])}: ${describePlan(plan)}.`
       : "Nothing obvious to swap out yet; adjusting will check again.";
+  } else if (higher) {
+    const gcs = [deck.commander, ...deck.groups.flatMap((g) => g.cards)].filter((c) => c.game_changer).length;
+    const n = Math.max(0, RAISE_GOAL[target] - gcs);
+    bracketNoteEl.textContent = n
+      ? `This would bring in up to ${plural(n, ["Game Changer", "Game Changers"])}, each replacing the least popular card in its group.`
+      : "Adjusting will check again.";
   } else if (sliderTouched) {
-    bracketNoteEl.textContent = est.bracket <= 2
-      ? "Already Bracket 2, the lowest this tool goes."
-      : `Already Bracket ${est.bracket}. Pick a lower target to swap cards out.`;
+    bracketNoteEl.textContent = `Already Bracket ${est.bracket}. Drag the slider to a different bracket to change the deck.`;
   } else {
     bracketNoteEl.textContent = "";
   }

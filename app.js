@@ -270,63 +270,6 @@ function selectCommander(card) {
     if (!selectedCommander || selectedCommander.id !== card.id) return; // commander changed again meanwhile
     populateArchetypeSelect(card, themes);
   });
-
-  el("archidekt-panel").classList.add("hidden");
-  fetchArchidektDecks(card).then((decks) => {
-    if (!selectedCommander || selectedCommander.id !== card.id) return;
-    renderArchidektDecks(decks);
-  });
-}
-
-// Most-viewed public Commander decks on Archidekt for this commander, through /api/proxy
-// (Archidekt blocks direct browser requests). Hidden whenever the lookup isn't available.
-const archidektCache = new Map();
-function fetchArchidektDecks(card) {
-  if (!archidektCache.has(card.id)) {
-    const promise = (async () => {
-      try {
-        const res = await fetch(`/api/proxy?target=archidekt&commander=${encodeURIComponent(card.name)}`);
-        if (!res.ok) return null;
-        const data = await res.json();
-        return Array.isArray(data.decks) ? data.decks : null;
-      } catch {
-        return null;
-      }
-    })();
-    archidektCache.set(card.id, promise);
-    promise.then((result) => {
-      if (result === null) archidektCache.delete(card.id);
-    });
-  }
-  return archidektCache.get(card.id);
-}
-
-function renderArchidektDecks(decks) {
-  const list = el("archidekt-list");
-  list.innerHTML = "";
-  const usable = (decks || []).filter((d) => typeof d.url === "string" && d.url.startsWith("https://archidekt.com/decks/"));
-  if (!usable.length) {
-    el("archidekt-panel").classList.add("hidden");
-    return;
-  }
-  usable.forEach((d) => {
-    const li = document.createElement("li");
-    const a = document.createElement("a");
-    a.href = d.url;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    a.textContent = d.name || "Untitled deck";
-    const meta = document.createElement("span");
-    meta.className = "meta";
-    const bits = [];
-    if (d.owner) bits.push(`by ${d.owner}`);
-    bits.push(`${(d.views || 0).toLocaleString()} views`);
-    if (d.bracket) bits.push(`Bracket ${d.bracket}`);
-    meta.textContent = bits.join(" · ");
-    li.append(a, meta);
-    list.appendChild(li);
-  });
-  el("archidekt-panel").classList.remove("hidden");
 }
 
 el("change-btn").addEventListener("click", () => {

@@ -59,29 +59,6 @@ async function spellbook(params) {
   return { status: 200, body: { combos }, cache: 6 * 3600 };
 }
 
-// The most-viewed public Commander decks on Archidekt for one commander.
-async function archidekt(params) {
-  const commander = (params.get("commander") || "").trim();
-  if (!commander || commander.length > 200) return { status: 400, body: { error: "bad commander" } };
-
-  const url = `https://archidekt.com/api/decks/v3/?commanderName=${encodeURIComponent(commander)}&formats=3&orderBy=-viewCount`;
-  const data = await getJson(url);
-
-  const decks = (data.results || [])
-    .filter((d) => !d.private && !d.unlisted && Number.isInteger(d.id))
-    .slice(0, 5)
-    .map((d) => ({
-      id: d.id,
-      name: String(d.name || "").slice(0, 120),
-      // Some Archidekt usernames are email addresses; don't republish those.
-      owner: d.owner && d.owner.username && !d.owner.username.includes("@") ? d.owner.username : "",
-      views: d.viewCount || 0,
-      bracket: d.edhBracket == null ? null : d.edhBracket,
-      url: `https://archidekt.com/decks/${d.id}`,
-    }));
-  return { status: 200, body: { decks }, cache: 6 * 3600 };
-}
-
 // Two-card combos that are actually inside a whole decklist, for the bracket estimate.
 // Commander Spellbook rates each combo (Ruthless = fast and cheap, then Spicy, Powerful, ...).
 // Combos needing a generic stand-in piece ("any creature") are skipped, as in `spellbook`.
@@ -109,7 +86,7 @@ async function spellbookBracket(body) {
   return { status: 200, body: { combos } };
 }
 
-const TARGETS = { spellbook, archidekt };
+const TARGETS = { spellbook };
 const POST_TARGETS = { "spellbook-bracket": spellbookBracket };
 
 const MAX_BODY_BYTES = 64 * 1024;

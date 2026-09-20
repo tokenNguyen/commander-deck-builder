@@ -3,7 +3,7 @@
 A static web app (no build step) that builds a prototypical 100-card Magic: The
 Gathering Commander/EDH deck around a commander you pick, using live card data from
 the [Scryfall API](https://scryfall.com/docs/api). One small serverless function
-(`api/proxy.js`, see below) covers the two sites that block direct browser access.
+(`api/proxy.js`, see below) covers Commander Spellbook, which blocks direct browser access.
 
 ## How it works
 
@@ -82,18 +82,16 @@ the [Scryfall API](https://scryfall.com/docs/api). One small serverless function
 
 ## The serverless proxy (`api/proxy.js`)
 
-[Commander Spellbook](https://commanderspellbook.com) (combos) and
-[Archidekt](https://archidekt.com) (popular decks for the selected commander) don't
-allow requests straight from a browser, so `api/proxy.js` fetches them server-side.
+[Commander Spellbook](https://commanderspellbook.com) (combos) doesn't allow requests
+straight from a browser, so `api/proxy.js` fetches it server-side.
 Vercel deploys any file in `api/` as a function automatically, with no extra setup.
 
-- It never takes a URL from the caller; each `target` (`spellbook`, `archidekt`, plus the
+- It never takes a URL from the caller; each `target` (`spellbook`, plus the
   POST-only `spellbook-bracket`, which checks a whole decklist for two-card combos) builds
   its own fixed upstream URL from validated parameters, so it can't be used as an open proxy.
-- Responses are cached for six hours to keep usage (and load on those sites) low.
-- The page treats it as optional: if `/api/proxy` isn't available, the Combos section
-  and the Archidekt list just stay hidden, the bracket estimate leaves out two-card
-  combos, and everything else works.
+- Responses are cached for six hours to keep usage (and load on that site) low.
+- The page treats it as optional: if `/api/proxy` isn't available, the Combos tab
+  says so, the bracket estimate leaves out two-card combos, and everything else works.
 
 ## Running it
 
@@ -105,8 +103,8 @@ powershell -ExecutionPolicy Bypass -File serve.ps1
 
 Then open `http://localhost:8177` in a browser. (`npx serve` or `python -m http.server`
 work too — just open `index.html` through a local server, not `file://`.) A static
-server doesn't run `api/proxy.js`, so locally the combos and Archidekt list stay
-hidden; they work once deployed to Vercel (or with `vercel dev`).
+server doesn't run `api/proxy.js`, so locally the combos stay
+unavailable; they work once deployed to Vercel (or with `vercel dev`).
 
 ## Notes / limitations
 

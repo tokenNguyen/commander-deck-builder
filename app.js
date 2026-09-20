@@ -881,6 +881,7 @@ function renderDeck(deck) {
 
   el("deck-panel").classList.remove("hidden");
   currentDeck = deck;
+  updateBracket(deck);
 }
 
 // Renders an actual card image (not a text row) for every card, including basic lands
@@ -911,6 +912,7 @@ function cardTile(card, qty, ctx) {
     badge.textContent = `×${qty}`;
     tile.appendChild(badge);
   }
+  if (card.game_changer) tile.appendChild(gameChangerBadge());
   tile.addEventListener("click", () => {
     if (Date.now() < suppressClickUntil) return;
     openCardModal(card, ctx);
@@ -950,6 +952,7 @@ function openCardModal(card, ctx) {
   img.alt = card.name;
   el("modal-title").textContent = card.name;
   el("modal-sub").textContent = [card.type_line, isCommander ? "Commander" : ctx && ctx.group.name].filter(Boolean).join(" · ");
+  el("modal-gc").classList.toggle("hidden", !card.game_changer);
   modalEl.querySelector('[data-tab="combos"]').classList.toggle("hidden", !combosApply(card));
   modalEl.querySelector('[data-tab="replacements"]').classList.toggle("hidden", !canReplace);
 
@@ -1219,6 +1222,7 @@ function renderReplacements(result, card, ctx) {
     const name = document.createElement("div");
     name.className = "suggestion-name";
     name.textContent = c.name;
+    if (c.game_changer) name.appendChild(gameChangerBadge());
     const swap = document.createElement("button");
     swap.type = "button";
     swap.className = "secondary swap-btn";
@@ -1324,6 +1328,171 @@ function renderCombos(combos, card) {
     return;
   }
   modalPanelEl.innerHTML = complete.map((c) => comboHtml(c, null)).join("") + near.map((c) => comboHtml(c, c.missing)).join("");
+}
+
+// ---------- Game Changers and the estimated bracket ----------
+//
+// Wizards' Commander Brackets (1 Exhibition ... 5 cEDH) come down to a few things you can check
+// from a decklist: how many "Game Changers" it runs (Scryfall flags each one as
+// card.game_changer), mass land denial, extra turns, and two-card combos. Brackets 1-2 allow no
+// Game Changers, 3 allows up to three, and 4-5 allow any number. Mass land denial and chained
+// extra turns start at 4, and 3 only allows two-card combos that come late. This is a guide,
+// not a verdict: it can't tell 1 from 2 (theme decks), or 4 from 5 (a competitive metagame).
+
+const BRACKET_NAMES = { 2: "Core", 3: "Upgraded", 4: "Optimized" };
+const COMBO_TAG_LABEL = { R: "Ruthless", S: "Spicy", P: "Powerful" }; // Spellbook's ratings that count
+
+// Cards that destroy or exile lots of lands at once (front-face names, lowercase).
+const MASS_LAND_DENIAL = new Set([
+  "armageddon", "ravages of war", "catastrophe", "devastation", "jokulhaups", "obliterate",
+  "decree of annihilation", "ruination", "sunder", "death cloud", "apocalypse", "boom",
+  "impending disaster", "cataclysm", "tectonic break", "global ruin", "acid rain", "boiling seas",
+  "fall of the thran", "realm razer", "restore balance", "thoughts of ruin", "tsunami",
+  "wake of destruction", "burning of xinye", "numot, the devastator",
+]);
+
+function gameChangerBadge() {
+  const badge = document.createElement("span");
+  badge.className = "gc-badge";
+  badge.textContent = "GC";
+  badge.title = "Game Changer";
+  return badge;
+}
+
+const oracleTextOf = (card) => card.oracle_text || (card.card_faces || []).map((f) => f.oracle_text || "").join(" ");
+const isExtraTurnCard = (card) => /\bextra turns?\b/i.test(oracleTextOf(card));
+
+// `comboInfo` is {status: "pending" | "unavailable"} or {status: "ok", combos} from Spellbook.
+function estimateBracket(deck, comboInfo) {
+  const cards = [deck.commander, ...deck.groups.flatMap((g) => g.cards)];
+  const namesOf = (list) => list.map((c) => c.name);
+  const gameChangers = namesOf(cards.filter((c) => c.game_changer));
+  const landDenial = namesOf(cards.filter((c) => MASS_LAND_DENIAL.has(frontFace(c.name).toLowerCase())));
+  const extraTurns = namesOf(cards.filter(isExtraTurnCard));
+  const combos = comboInfo.status === "ok"
+    ? comboInfo.combos.filter((c) => c.cards.length === 2 && COMBO_TAG_LABEL[c.bracketTag])
+    : [];
+  const earlyCombos = combos.filter((c) => c.bracketTag === "R");
+  const comboText = (list) => list.map((c) => c.cards.join(" + ")).join("; ");
+
+  let bracket = 2;
+  const why = [];
+  const need = (b, text) => {
+    bracket = Math.max(bracket, b);
+    why.push({ b, text });
+  };
+  if (gameChangers.length > 3) need(4, `${gameChangers.length} Game Changers (Bracket 3 allows up to 3)`);
+  else if (gameChangers.length) need(3, `${gameChangers.length} Game Changer${gameChangers.length > 1 ? "s" : ""} (Brackets 1–2 allow none)`);
+  if (landDenial.length) need(4, `mass land denial (${landDenial.join(", ")})`);
+  if (extraTurns.length >= 3) need(4, `${extraTurns.length} extra-turn spells that could be chained`);
+  if (earlyCombos.length) need(4, `a fast two-card combo (${comboText(earlyCombos)})`);
+  else if (combos.length) need(3, `a two-card combo (${comboText(combos)}); only late-game ones fit Bracket 3`);
+  why.sort((a, b) => b.b - a.b);
+
+  return { bracket, why, gameChangers, landDenial, extraTurns, combos };
+}
+
+function renderBracket(deck, comboInfo) {
+  const est = estimateBracket(deck, comboInfo);
+  const list = (names) => names.map(escapeHtml).join(", ");
+  const fact = (label, value, level) =>
+    `<li class="fact-${level}"><b>${label}</b><span class="fact-value">${value}</span></li>`;
+
+  const gcCount = est.gameChangers.length;
+  const facts = [
+    gcCount
+      ? fact("Game Changers", `${gcCount}: ${list(est.gameChangers)}`, gcCount > 3 ? "hot" : "warn")
+      : fact("Game Changers", "None", "ok"),
+    est.landDenial.length ? fact("Mass land denial", list(est.landDenial), "hot") : fact("Mass land denial", "None", "ok"),
+    est.extraTurns.length
+      ? fact("Extra-turn spells", `${est.extraTurns.length}: ${list(est.extraTurns)}`, est.extraTurns.length >= 3 ? "hot" : "warn")
+      : fact("Extra-turn spells", "None", "ok"),
+  ];
+  if (comboInfo.status === "ok") {
+    facts.push(
+      est.combos.length
+        ? fact(
+            "Two-card combos",
+            est.combos.map((c) => `${c.cards.map(escapeHtml).join(" + ")} (${COMBO_TAG_LABEL[c.bracketTag]})`).join("<br>"),
+            est.combos.some((c) => c.bracketTag === "R") ? "hot" : "warn"
+          )
+        : fact("Two-card combos", "None found", "ok")
+    );
+  } else {
+    facts.push(
+      fact("Two-card combos", comboInfo.status === "pending" ? "Checking…" : "Couldn't check right now", "warn")
+    );
+  }
+
+  let hint = "";
+  if (est.bracket === 2 && !est.why.length) hint = "A single Game Changer would make it Bracket 3.";
+  else if (est.bracket === 3 && gcCount === 3 && est.why.every((w) => w.b < 4)) hint = "One more Game Changer would make it Bracket 4.";
+
+  const reason = est.why.length
+    ? `Because of ${est.why.map((w) => w.text).join("; ")}.`
+    : "No Game Changers, mass land denial, chained extra turns or two-card combos found.";
+  const unchecked = comboInfo.status !== "ok" && est.bracket < 4
+    ? " Two-card combos aren't included yet."
+    : "";
+
+  const panel = el("bracket-panel");
+  panel.innerHTML = `
+    <div class="bracket-head">
+      <span class="bracket-badge bracket-${est.bracket}">Bracket ${est.bracket}</span>
+      <span class="bracket-name">${BRACKET_NAMES[est.bracket]}</span>
+      <span class="bracket-est">estimated</span>
+    </div>
+    <p class="bracket-why">${escapeHtml(reason + unchecked)}</p>
+    ${hint ? `<p class="bracket-hint">${escapeHtml(hint)}</p>` : ""}
+    <ul class="bracket-facts">${facts.join("")}</ul>
+    <details class="bracket-more">
+      <summary>How this is estimated</summary>
+      <p>Based on Wizards of the Coast's Commander Brackets. Game Changers come from Scryfall's flag on each card. Extra-turn spells are found from card text and mass land denial from a list of known cards. Two-card combos come from Commander Spellbook: its Ruthless-rated combos are treated as fast (Bracket 4), and Spicy or Powerful ones as fine for Bracket 3. Bracket 1 is for themed or low-power decks and Bracket 5 is competitive (cEDH), so this only reports 2 to 4. Your pod's conversation matters more than any number here.</p>
+    </details>`;
+  panel.classList.remove("hidden");
+}
+
+const bracketComboCache = new Map(); // deck key -> {status: "ok", combos}
+let bracketToken = 0; // lets a slow combo lookup notice the deck has changed since
+let bracketTimer = null;
+
+function bracketDeckKey(deck) {
+  const names = deck.groups.flatMap((g) => g.cards).filter((c) => !/Basic Land/.test(c.type_line || "")).map((c) => frontFace(c.name));
+  return [frontFace(deck.commander.name), ...new Set(names)].sort().join("|");
+}
+
+// Shows the estimate right away from what's already known (Game Changers etc.), then adds the
+// two-card combo check once Spellbook answers. Quick edits collapse into a single lookup.
+function updateBracket(deck) {
+  const token = ++bracketToken;
+  clearTimeout(bracketTimer);
+  const key = bracketDeckKey(deck);
+  const cached = bracketComboCache.get(key);
+  renderBracket(deck, cached || { status: "pending" });
+  if (cached) return;
+  bracketTimer = setTimeout(async () => {
+    const info = await fetchBracketCombos(deck, key);
+    if (token === bracketToken) renderBracket(deck, info);
+  }, 500);
+}
+
+async function fetchBracketCombos(deck, key) {
+  const cards = [...new Set(deck.groups.flatMap((g) => g.cards).filter((c) => !/Basic Land/.test(c.type_line || "")).map((c) => frontFace(c.name)))];
+  try {
+    const res = await fetch("/api/proxy?target=spellbook-bracket", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commander: frontFace(deck.commander.name), cards }),
+    });
+    if (!res.ok) return { status: "unavailable" };
+    const data = await res.json();
+    if (!Array.isArray(data.combos)) return { status: "unavailable" };
+    const info = { status: "ok", combos: data.combos };
+    bracketComboCache.set(key, info); // failures aren't remembered, so the next edit retries
+    return info;
+  } catch {
+    return { status: "unavailable" };
+  }
 }
 
 const rulingsCache = new Map();

@@ -15,12 +15,16 @@ function send(res, status, body, cacheSeconds) {
   res.end(JSON.stringify(body));
 }
 
-async function getJson(url) {
+async function getJson(url, body) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
   try {
+    const headers = { Accept: "application/json", "User-Agent": "commander-deck-builder (personal project)" };
+    if (body) headers["Content-Type"] = "application/json";
     const res = await fetch(url, {
-      headers: { Accept: "application/json", "User-Agent": "commander-deck-builder (personal project)" },
+      method: body ? "POST" : "GET",
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     });
     if (!res.ok) throw new Error(`upstream ${res.status}`);
@@ -78,19 +82,67 @@ async function archidekt(params) {
   return { status: 200, body: { decks }, cache: 6 * 3600 };
 }
 
+// Two-card combos that are actually inside a whole decklist, for the bracket estimate.
+// Commander Spellbook rates each combo (Ruthless = fast and cheap, then Spicy, Powerful, ...).
+// Combos needing a generic stand-in piece ("any creature") are skipped, as in `spellbook`.
+async function spellbookBracket(body) {
+  const commander = body && typeof body.commander === "string" ? body.commander.trim() : "";
+  const cards = body && Array.isArray(body.cards) ? body.cards : null;
+  const valid = (n) => typeof n === "string" && n.trim() && n.length <= 200;
+  if (!commander || commander.length > 200 || !cards || cards.length > 150 || !cards.every(valid)) {
+    return { status: 400, body: { error: "bad deck" } };
+  }
+  const data = await getJson("https://backend.commanderspellbook.com/estimate-bracket", {
+    main: cards.map((card) => ({ card: card.trim(), quantity: 1 })),
+    commanders: [{ card: commander, quantity: 1 }],
+  });
+  const combos = (data.combos || [])
+    .map((entry) => entry.combo)
+    .filter((c) => c && !(c.requires && c.requires.length))
+    .map((c) => ({
+      cards: (c.uses || []).map((u) => u.card && u.card.name).filter(Boolean),
+      produces: (c.produces || []).map((p) => p.feature && p.feature.name).filter(Boolean).slice(0, 6),
+      bracketTag: typeof c.bracketTag === "string" ? c.bracketTag : "",
+    }))
+    .filter((c) => c.cards.length)
+    .slice(0, 40);
+  return { status: 200, body: { combos } };
+}
+
 const TARGETS = { spellbook, archidekt };
+const POST_TARGETS = { "spellbook-bracket": spellbookBracket };
+
+const MAX_BODY_BYTES = 64 * 1024;
+// Vercel hands over a parsed req.body for JSON requests; a plain Node server does not.
+async function readJson(req) {
+  if (req.body !== undefined && req.body !== null) {
+    if (Buffer.isBuffer(req.body)) return null;
+    if (typeof req.body === "object") return req.body;
+    try { return JSON.parse(String(req.body)); } catch { return null; }
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) return null;
+    chunks.push(chunk);
+  }
+  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { return null; }
+}
 
 module.exports = async function handler(req, res) {
-  if (req.method !== "GET") {
-    res.setHeader("Allow", "GET");
-    return send(res, 405, { error: "GET only" });
+  const isPost = req.method === "POST";
+  if (req.method !== "GET" && !isPost) {
+    res.setHeader("Allow", "GET, POST");
+    return send(res, 405, { error: "GET or POST only" });
   }
   const params = new URL(req.url, "http://localhost").searchParams;
   const target = params.get("target");
-  if (!Object.prototype.hasOwnProperty.call(TARGETS, target)) return send(res, 400, { error: "unknown target" });
+  const table = isPost ? POST_TARGETS : TARGETS;
+  if (!Object.prototype.hasOwnProperty.call(table, target)) return send(res, 400, { error: "unknown target" });
 
   try {
-    const result = await TARGETS[target](params);
+    const result = isPost ? await table[target](await readJson(req)) : await table[target](params);
     send(res, result.status, result.body, result.cache);
   } catch (err) {
     send(res, 502, { error: "upstream unavailable" });

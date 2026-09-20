@@ -27,6 +27,15 @@ the [Scryfall API](https://scryfall.com/docs/api). One small serverless function
    new card in the old one's slot. Drag cards to add or remove them (see the hint
    above the deck). **Copy Decklist** copies a plain text list (works with Moxfield,
    Archidekt, TappedOut, etc.).
+5. **Game Changers and estimated bracket.** Scryfall flags Wizards' Game Changer cards
+   (`game_changer` on each card), so they get a gold **GC** badge on their tile, in the
+   details window and in swap suggestions. Above the deck, an estimate of the deck's
+   [Commander Bracket](https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta)
+   (2 Core, 3 Upgraded, 4 Optimized) is worked out from the Game Changer count
+   (none = 2, up to three = 3, more = 4), mass land denial, extra-turn spells, and
+   two-card combos (via Commander Spellbook: fast "Ruthless" ones push it to 4). It updates
+   whenever you add, remove or swap a card. It's a guide only: it can't tell Bracket 1
+   from 2 or 4 from 5.
 
 ## The serverless proxy (`api/proxy.js`)
 
@@ -35,11 +44,13 @@ the [Scryfall API](https://scryfall.com/docs/api). One small serverless function
 allow requests straight from a browser, so `api/proxy.js` fetches them server-side.
 Vercel deploys any file in `api/` as a function automatically, with no extra setup.
 
-- It never takes a URL from the caller; each `target` (`spellbook`, `archidekt`) builds
+- It never takes a URL from the caller; each `target` (`spellbook`, `archidekt`, plus the
+  POST-only `spellbook-bracket`, which checks a whole decklist for two-card combos) builds
   its own fixed upstream URL from validated parameters, so it can't be used as an open proxy.
 - Responses are cached for six hours to keep usage (and load on those sites) low.
 - The page treats it as optional: if `/api/proxy` isn't available, the Combos section
-  and the Archidekt list just stay hidden and everything else works.
+  and the Archidekt list just stay hidden, the bracket estimate leaves out two-card
+  combos, and everything else works.
 
 ## Running it
 
@@ -59,4 +70,4 @@ hidden; they work once deployed to Vercel (or with `vercel dev`).
 - Categorization leans on Scryfall's crowdsourced oracle tags, which are good but not
   exhaustive — obscure commanders may get a thinner "Creatures & Other Spells" pool.
 - This is a *starting point* deck, not a tuned build — swap cards to taste.
-- No card prices, no saving/exporting to a specific site format beyond plain text.
+- No saving/exporting to a specific site format beyond plain text.

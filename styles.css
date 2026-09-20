@@ -471,6 +471,42 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .ruling:first-child { border-top: none; padding-top: 0; margin-top: 0; }
 .ruling-date { display: block; font-size: 11px; color: #6b7280; margin-bottom: 2px; }
 
+/* Game Changers + estimated bracket */
+.gc-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: #d7b56d;
+  color: #1a1408;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  line-height: 1.5;
+}
+.card-tile .gc-badge { position: absolute; top: 6px; right: 6px; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.55); }
+.gc-note { margin: 0 0 12px; font-size: 12.5px; line-height: 1.5; color: #cdd3db; }
+.suggestion-name .gc-badge { margin-left: 4px; vertical-align: 1px; }
+
+.bracket-panel { margin-bottom: 18px; padding: 14px 16px; background: #1a1f27; border: 1px solid #2c3340; border-radius: 10px; }
+.bracket-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.bracket-badge { padding: 3px 12px; border-radius: 14px; font-size: 13px; font-weight: 800; }
+.bracket-2 { background: rgba(143, 194, 143, 0.18); color: #8fc28f; }
+.bracket-3 { background: rgba(215, 181, 109, 0.18); color: #d7b56d; }
+.bracket-4 { background: rgba(224, 122, 95, 0.18); color: #e58a70; }
+.bracket-name { font-size: 16px; font-weight: 700; }
+.bracket-est { font-size: 12px; color: #6b7280; }
+.bracket-why { margin: 8px 0 0; font-size: 13px; line-height: 1.45; color: #cdd3db; }
+.bracket-hint { margin: 4px 0 0; font-size: 12.5px; color: #9aa4b2; }
+.bracket-facts { list-style: none; margin: 12px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px 18px; }
+.bracket-facts li { font-size: 12.5px; line-height: 1.4; color: #9aa4b2; min-width: 0; overflow-wrap: anywhere; }
+.bracket-facts b { display: block; margin-bottom: 1px; font-size: 11px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase; color: #6b7280; }
+.bracket-facts .fact-ok .fact-value { color: #8fc28f; }
+.bracket-facts .fact-warn .fact-value { color: #d7b56d; }
+.bracket-facts .fact-hot .fact-value { color: #e58a70; }
+.bracket-more { margin-top: 12px; font-size: 12px; line-height: 1.5; color: #6b7280; }
+.bracket-more summary { cursor: pointer; color: #9aa4b2; }
+.bracket-more p { margin: 6px 0 0; }
+
 footer {
   text-align: center;
   padding: 18px;

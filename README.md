@@ -36,6 +36,22 @@ the [Scryfall API](https://scryfall.com/docs/api). One small serverless function
    two-card combos (via Commander Spellbook: fast "Ruthless" ones push it to 4). It updates
    whenever you add, remove or swap a card. It's a guide only: it can't tell Bracket 1
    from 2 or 4 from 5.
+6. **Target bracket at build time.** The **Target bracket** menu next to the archetype
+   (2 Core, 3 Upgraded, or 4 with no limits, the default) makes **Build Deck** and
+   **Rebuild** respect that bracket from the start. Restricted cards are skipped while
+   picking, so the next-best card in each category takes the slot: Bracket 2 uses no Game
+   Changers, Bracket 3 keeps the three most popular ones the deck would have picked, and
+   both skip mass land denial and cap extra-turn spells at two. Two-card combos can't be
+   ruled out card by card, so the finished deck is checked and one piece of any combo the
+   target doesn't allow is swapped.
+7. **Target bracket slider.** Drag it to a lower bracket and press **Adjust deck** to swap
+   out whatever holds the deck above it: Game Changers beyond the target's limit (the
+   least popular go first; cards you added yourself are kept longest), mass land denial,
+   extra-turn spells beyond two, and one card from each two-card combo the target doesn't
+   allow. Each is replaced in place by a popular card for the same job (the same search the
+   Replacements tab uses) that has none of those traits, so the deck stays the same size.
+   A note previews how many cards would change, "See what changed" lists every swap, and
+   **Undo** restores the deck until you make another edit. It only lowers a deck.
 
 ## The serverless proxy (`api/proxy.js`)
 

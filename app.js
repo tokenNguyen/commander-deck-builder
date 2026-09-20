@@ -350,6 +350,18 @@ el("reroll-btn").addEventListener("click", () => buildDeck());
 // not just a generic Scryfall tag search. This is an unofficial API, so every call here
 // fails soft: if EDHREC is unreachable, the curated archetypes still work as before.
 
+const bracketSelect = el("bracket-select");
+const BRACKET_SELECT_TEXT = {
+  2: "No Game Changers, no mass land denial, at most two extra-turn spells, and no two-card combos.",
+  3: "Up to three Game Changers (the most popular ones the deck picks), no mass land denial, at most two extra-turn spells, and no fast two-card combos.",
+  4: "No limits: the most popular cards for the commander.",
+};
+function updateBracketSelectDesc() {
+  el("bracket-select-desc").textContent = BRACKET_SELECT_TEXT[bracketSelect.value] || "";
+}
+bracketSelect.addEventListener("change", updateBracketSelectDesc);
+updateBracketSelectDesc();
+
 const archetypeSelect = el("archetype-select");
 let dynamicArchetypes = {}; // populated per-commander from EDHREC; keys look like "edhrec:<slug>"
 const commanderThemeCache = new Map();
@@ -516,32 +528,20 @@ async function buildDeck() {
 
   try {
     const archetype = resolveArchetype(archetypeSelect.value);
+    const bracketTarget = Number(bracketSelect.value) || 4;
     const targets = { ...DEFAULT_TARGETS, ...(archetype.targets || {}) };
     const extraFilter = archetype.extraFilter ? ` ${archetype.extraFilter}` : "";
 
     const identity = selectedCommander.color_identity || [];
     const idFrag = identityQueryFragment(identity);
     const legalBase = `${idFrag} legal:commander -is:commander game:paper`;
-    const used = new Set([normalizeName(selectedCommander.name)]);
-
-    const takeFresh = (pool, n) => {
-      const picked = [];
-      for (const c of pool) {
-        const key = normalizeName(c.name);
-        if (used.has(key)) continue;
-        used.add(key);
-        picked.push(c);
-        if (picked.length >= n) break;
-      }
-      return picked;
-    };
 
     // For a dynamic EDHREC archetype, pull that exact commander+theme's card pools up
     // front so every category below leans on real EDHREC data, not just a small
     // "synergy" slice — this is what actually makes a deck feel built around the theme.
     let themePools = null; // { synergy, ramp, lands, fill }
     let themeNameSet = null; // every card name EDHREC associates with this commander+theme
-    let synergyNote = "";
+    let themeNote = "";
     if (archetype.dynamicEdhrec) {
       await setStatus(`Loading ${archetype.label} data from EDHREC...`);
       try {
@@ -566,7 +566,7 @@ async function buildDeck() {
         themeNameSet = new Set(resolved.map((c) => normalizeName(c.name)));
       } catch (err) {
         console.error(err);
-        synergyNote = "Couldn't load EDHREC data for this theme — used goodstuff picks instead.";
+        themeNote = "Couldn't load EDHREC data for this theme — used goodstuff picks instead.";
       }
       await sleep(90);
     }
@@ -583,132 +583,196 @@ async function buildDeck() {
       return [...onTheme, ...rest];
     };
 
-    await setStatus("Finding ramp...");
-    const rampCandidates = [...(themePools?.ramp || []), ...(await scryfallSearch(`${legalBase} otag:ramp order:edhrec`, { limit: 60 }))];
-    const ramp = takeFresh(rampCandidates, targets.ramp);
-    await sleep(90);
+    // Scryfall's answers are remembered for this build, so a second pass costs no requests.
+    const searchMemo = new Map();
+    const search = (query, opts = {}) => {
+      const key = `${opts.limit}|${query}`;
+      if (!searchMemo.has(key)) searchMemo.set(key, scryfallSearch(query, opts));
+      return searchMemo.get(key);
+    };
 
-    await setStatus("Finding removal...");
-    const removalPool = prioritizeByTheme(await scryfallSearch(`${legalBase} otag:removal order:edhrec`, { limit: 60 }));
-    const removal = takeFresh(removalPool, targets.removal);
-    await sleep(90);
+    // One full pass of picking the 99. `allowGc` is the set of Game Changer names that may be
+    // picked (null for any), so a target bracket can rule cards out before they are chosen
+    // rather than after: the next-best card in each pool takes the slot instead.
+    const assemble = async (allowGc) => {
+      const used = new Set([normalizeName(selectedCommander.name)]);
+      let extraTurns = 0;
+      let synergyNote = themeNote;
 
-    let wipe = [];
-    if (targets.wipe > 0) {
-      await setStatus("Finding board wipes...");
-      const wipePool = prioritizeByTheme(await scryfallSearch(`${legalBase} otag:board-wipe order:edhrec`, { limit: 40 }));
-      wipe = takeFresh(wipePool, targets.wipe);
+      // Bracket 4 has no card limits. Below it: no mass land denial, at most two extra-turn
+      // spells (the same limits the bracket estimate uses), and only the allowed Game Changers.
+      const isAllowed = (c) => {
+        if (bracketTarget >= 4) return true;
+        if (MASS_LAND_DENIAL.has(frontFace(c.name).toLowerCase())) return false;
+        if (c.game_changer && allowGc && !allowGc.has(c.name)) return false;
+        if (isExtraTurnCard(c) && extraTurns >= 2) return false;
+        return true;
+      };
+
+      const takeFresh = (pool, n) => {
+        const picked = [];
+        for (const c of pool) {
+          const key = normalizeName(c.name);
+          if (used.has(key) || !isAllowed(c)) continue;
+          used.add(key);
+          if (isExtraTurnCard(c)) extraTurns++;
+          picked.push(c);
+          if (picked.length >= n) break;
+        }
+        return picked;
+      };
+
+      await setStatus("Finding ramp...");
+      const rampCandidates = [...(themePools?.ramp || []), ...(await search(`${legalBase} otag:ramp order:edhrec`, { limit: 60 }))];
+      const ramp = takeFresh(rampCandidates, targets.ramp);
       await sleep(90);
-    }
 
-    await setStatus("Finding card draw...");
-    const drawPool = prioritizeByTheme(await scryfallSearch(`${legalBase} otag:card-advantage order:edhrec`, { limit: 60 }));
-    let draw = takeFresh(drawPool, targets.draw);
-    if (draw.length < targets.draw) {
-      const drawPool2 = prioritizeByTheme(await scryfallSearch(`${legalBase} otag:card-draw order:edhrec`, { limit: 60 }));
-      draw = draw.concat(takeFresh(drawPool2, targets.draw - draw.length));
-    }
-    await sleep(90);
+      await setStatus("Finding removal...");
+      const removalPool = prioritizeByTheme(await search(`${legalBase} otag:removal order:edhrec`, { limit: 60 }));
+      const removal = takeFresh(removalPool, targets.removal);
+      await sleep(90);
 
-    await setStatus("Finding nonbasic lands...");
-    const landCandidates = [
-      ...(themePools?.lands || []),
-      ...(await scryfallSearch(`${idFrag} legal:commander t:land -t:basic game:paper order:edhrec`, { limit: 60 })),
-    ];
-    const relevantLandPool = landCandidates.filter((c) => isLandRelevant(c, identity));
-    const nonbasicLands = takeFresh(relevantLandPool, targets.nonbasicLands);
-    await sleep(90);
+      let wipe = [];
+      if (targets.wipe > 0) {
+        await setStatus("Finding board wipes...");
+        const wipePool = prioritizeByTheme(await search(`${legalBase} otag:board-wipe order:edhrec`, { limit: 40 }));
+        wipe = takeFresh(wipePool, targets.wipe);
+        await sleep(90);
+      }
 
-    const fixedNonland = ramp.length + removal.length + wipe.length + draw.length;
-    const fillNeeded = Math.max(0, 99 - targets.totalLands - fixedNonland);
+      await setStatus("Finding card draw...");
+      const drawPool = prioritizeByTheme(await search(`${legalBase} otag:card-advantage order:edhrec`, { limit: 60 }));
+      let draw = takeFresh(drawPool, targets.draw);
+      if (draw.length < targets.draw) {
+        const drawPool2 = prioritizeByTheme(await search(`${legalBase} otag:card-draw order:edhrec`, { limit: 60 }));
+        draw = draw.concat(takeFresh(drawPool2, targets.draw - draw.length));
+      }
+      await sleep(90);
 
-    // Archetype synergy pool: pulls themed cards (sacrifice outlets, token makers, etc.)
-    // before the general goodstuff pool fills whatever's left.
-    let synergy = [];
-    if (archetype.dynamicTribal) {
-      const tribalTypes = getCreatureSubtypes(selectedCommander);
-      if (tribalTypes.length) {
-        synergyNote = `Tribal theme: ${tribalTypes.join(", ")}`;
-        await setStatus(`Finding ${tribalTypes.join("/")} tribal cards...`);
-        const tribalQuery = `(${tribalTypes.map((t) => `t:"${t}"`).join(" or ")})`;
-        const pool = await scryfallSearch(`${legalBase} ${tribalQuery} order:edhrec`, { limit: 60 });
+      await setStatus("Finding nonbasic lands...");
+      const landCandidates = [
+        ...(themePools?.lands || []),
+        ...(await search(`${idFrag} legal:commander t:land -t:basic game:paper order:edhrec`, { limit: 60 })),
+      ];
+      const relevantLandPool = landCandidates.filter((c) => isLandRelevant(c, identity));
+      const nonbasicLands = takeFresh(relevantLandPool, targets.nonbasicLands);
+      await sleep(90);
+
+      const fixedNonland = ramp.length + removal.length + wipe.length + draw.length;
+      const fillNeeded = Math.max(0, 99 - targets.totalLands - fixedNonland);
+
+      // Archetype synergy pool: pulls themed cards (sacrifice outlets, token makers, etc.)
+      // before the general goodstuff pool fills whatever's left.
+      let synergy = [];
+      if (archetype.dynamicTribal) {
+        const tribalTypes = getCreatureSubtypes(selectedCommander);
+        if (tribalTypes.length) {
+          synergyNote = `Tribal theme: ${tribalTypes.join(", ")}`;
+          await setStatus(`Finding ${tribalTypes.join("/")} tribal cards...`);
+          const tribalQuery = `(${tribalTypes.map((t) => `t:"${t}"`).join(" or ")})`;
+          const pool = await search(`${legalBase} ${tribalQuery} order:edhrec`, { limit: 60 });
+          synergy = takeFresh(pool, Math.min(archetype.synergyCount, fillNeeded));
+          await sleep(90);
+        } else {
+          synergyNote = "No creature type detected on this commander — used goodstuff picks instead.";
+        }
+      } else if (archetype.dynamicEdhrec) {
+        if (themePools && themePools.synergy.length) {
+          synergy = takeFresh(themePools.synergy, Math.min(archetype.synergyCount, fillNeeded));
+        }
+        if (!synergy.length && !synergyNote) {
+          synergyNote = "No EDHREC synergy cards found for this theme in your colors — used goodstuff picks instead.";
+        }
+      } else if (archetype.synergyQuery) {
+        await setStatus(`Finding ${archetype.label} synergy cards...`);
+        const pool = await search(`${legalBase} ${archetype.synergyQuery}${extraFilter} order:edhrec`, { limit: 60 });
         synergy = takeFresh(pool, Math.min(archetype.synergyCount, fillNeeded));
         await sleep(90);
-      } else {
-        synergyNote = "No creature type detected on this commander — used goodstuff picks instead.";
       }
-    } else if (archetype.dynamicEdhrec) {
-      if (themePools && themePools.synergy.length) {
-        synergy = takeFresh(themePools.synergy, Math.min(archetype.synergyCount, fillNeeded));
-      }
-      if (!synergy.length && !synergyNote) {
-        synergyNote = "No EDHREC synergy cards found for this theme in your colors — used goodstuff picks instead.";
-      }
-    } else if (archetype.synergyQuery) {
-      await setStatus(`Finding ${archetype.label} synergy cards...`);
-      const pool = await scryfallSearch(`${legalBase} ${archetype.synergyQuery}${extraFilter} order:edhrec`, { limit: 60 });
-      synergy = takeFresh(pool, Math.min(archetype.synergyCount, fillNeeded));
-      await sleep(90);
-    }
 
-    await setStatus("Rounding out the rest of the deck...");
-    const generalFillNeeded = fillNeeded - synergy.length;
-    // The theme's own Creatures/Instants/Sorceries/Artifacts/Enchantments/Planeswalkers
-    // lists are the primary fill source for a dynamic EDHREC archetype — this is the
-    // category that used to be 100% generic regardless of the chosen theme. The plain
-    // Scryfall pool below only fills in if that runs short (rare, but always fetched
-    // for every other archetype exactly as before).
-    let fill = themePools ? takeFresh(themePools.fill, generalFillNeeded) : [];
-    let fillPool = null;
-    const ensureFillPool = async () => {
-      if (!fillPool) fillPool = await scryfallSearch(`${legalBase} -t:land${extraFilter} order:edhrec`, { limit: 200 });
-      return fillPool;
+      await setStatus("Rounding out the rest of the deck...");
+      const generalFillNeeded = fillNeeded - synergy.length;
+      // The theme's own Creatures/Instants/Sorceries/Artifacts/Enchantments/Planeswalkers
+      // lists are the primary fill source for a dynamic EDHREC archetype — this is the
+      // category that used to be 100% generic regardless of the chosen theme. The plain
+      // Scryfall pool below only fills in if that runs short (rare, but always fetched
+      // for every other archetype exactly as before).
+      let fill = themePools ? takeFresh(themePools.fill, generalFillNeeded) : [];
+      let fillPool = null;
+      const ensureFillPool = async () => {
+        if (!fillPool) fillPool = await search(`${legalBase} -t:land${extraFilter} order:edhrec`, { limit: 200 });
+        return fillPool;
+      };
+      if (fill.length < generalFillNeeded) {
+        const pool = await ensureFillPool();
+        fill = fill.concat(takeFresh(pool, generalFillNeeded - fill.length));
+      }
+
+      // If any category came up short (small/obscure color identity), pad from the general pool.
+      let shortfall = 99 - targets.totalLands - (fixedNonland + synergy.length + fill.length);
+      if (shortfall > 0) {
+        const pool = await ensureFillPool();
+        fill.push(...takeFresh(pool, shortfall));
+        shortfall = 99 - targets.totalLands - (fixedNonland + synergy.length + fill.length);
+      }
+
+      await setStatus("Balancing the mana base...");
+      const nonlandCards = [...ramp, ...removal, ...wipe, ...draw, ...synergy, ...fill];
+      const basicsNeeded = Math.max(0, targets.totalLands - nonbasicLands.length);
+      const basics = buildBasicLands(identity, [...nonlandCards, selectedCommander], basicsNeeded);
+
+      await setStatus("Fetching basic land art...");
+      const basicCards = await fetchBasicLandCards(basics.entries);
+
+      const groups = [
+        { name: "Ramp", cards: ramp },
+        { name: "Removal", cards: removal },
+        { name: "Board Wipes", cards: wipe },
+        { name: "Card Draw", cards: draw },
+      ];
+      if (synergy.length) groups.push({ name: `${archetype.label} Synergy`, cards: synergy });
+      groups.push(
+        { name: "Creatures & Other Spells", cards: fill },
+        { name: "Added Cards", cards: [], isAdded: true },
+        { name: "Nonbasic Lands", cards: nonbasicLands },
+        { name: "Basic Lands", cards: basicCards, isBasics: true }
+      );
+
+      return {
+        commander: selectedCommander,
+        archetypeLabel: archetype.label,
+        synergyNote,
+        identity,
+        groups,
+      };
     };
-    if (fill.length < generalFillNeeded) {
-      const pool = await ensureFillPool();
-      fill = fill.concat(takeFresh(pool, generalFillNeeded - fill.length));
+
+    // Bracket 2 allows no Game Changers. Bracket 3 allows three: build once with any allowed,
+    // then, if the deck ran past that, build again keeping only the most popular of the ones
+    // it picked (the commander itself counts if it is one).
+    let deck = await assemble(bracketTarget === 2 ? new Set() : null);
+    if (bracketTarget === 3) {
+      const room = Math.max(0, 3 - (selectedCommander.game_changer ? 1 : 0));
+      const picked = deck.groups.flatMap((g) => g.cards).filter((c) => c.game_changer);
+      if (picked.length > room) {
+        await setStatus("Trimming Game Changers for Bracket 3...");
+        picked.sort((a, b) => (a.edhrec_rank ?? 1e9) - (b.edhrec_rank ?? 1e9));
+        deck = await assemble(new Set(picked.slice(0, room).map((c) => c.name)));
+      }
     }
 
-    // If any category came up short (small/obscure color identity), pad from the general pool.
-    let shortfall = 99 - targets.totalLands - (fixedNonland + synergy.length + fill.length);
-    if (shortfall > 0) {
-      const pool = await ensureFillPool();
-      fill.push(...takeFresh(pool, shortfall));
-      shortfall = 99 - targets.totalLands - (fixedNonland + synergy.length + fill.length);
+    // Two-card combos can't be ruled out card by card, so check the finished deck and swap
+    // a piece of any combo the target doesn't allow.
+    let fix = null;
+    if (bracketTarget < 4) {
+      await setStatus("Checking for two-card combos...");
+      currentDeck = deck;
+      fix = await runAdjustment(deck, bracketTarget);
     }
-
-    await setStatus("Balancing the mana base...");
-    const nonlandCards = [...ramp, ...removal, ...wipe, ...draw, ...synergy, ...fill];
-    const basicsNeeded = Math.max(0, targets.totalLands - nonbasicLands.length);
-    const basics = buildBasicLands(identity, [...nonlandCards, selectedCommander], basicsNeeded);
-
-    await setStatus("Fetching basic land art...");
-    const basicCards = await fetchBasicLandCards(basics.entries);
-
-    const groups = [
-      { name: "Ramp", cards: ramp },
-      { name: "Removal", cards: removal },
-      { name: "Board Wipes", cards: wipe },
-      { name: "Card Draw", cards: draw },
-    ];
-    if (synergy.length) groups.push({ name: `${archetype.label} Synergy`, cards: synergy });
-    groups.push(
-      { name: "Creatures & Other Spells", cards: fill },
-      { name: "Added Cards", cards: [], isAdded: true },
-      { name: "Nonbasic Lands", cards: nonbasicLands },
-      { name: "Basic Lands", cards: basicCards, isBasics: true }
-    );
-
-    const deck = {
-      commander: selectedCommander,
-      archetypeLabel: archetype.label,
-      synergyNote,
-      identity,
-      groups,
-    };
 
     currentDeck = deck;
     renderDeck(deck);
+    if (fix) showAdjustResult(deck, bracketTarget, fix.swaps, fix.stuck, fix.comboChecked, fix.failed, true);
   } catch (err) {
     el("status-text").textContent = "Something went wrong: " + err.message;
     console.error(err);
@@ -1175,17 +1239,21 @@ function replacementSearch(card, ctx) {
 }
 
 const replacementCache = new Map(); // search query -> Promise<card[] | null>
+function searchPool(query) {
+  if (!replacementCache.has(query)) {
+    const promise = scryfallSearch(query, { limit: 60 }).catch(() => null);
+    replacementCache.set(query, promise);
+    promise.then((pool) => {
+      if (pool === null) replacementCache.delete(query); // don't remember failures
+    });
+  }
+  return replacementCache.get(query);
+}
+
 function fetchReplacements(card, ctx) {
   const search = replacementSearch(card, ctx);
   if (!search) return Promise.resolve({ label: "", cards: [] });
-  if (!replacementCache.has(search.query)) {
-    const promise = scryfallSearch(search.query, { limit: 60 }).catch(() => null);
-    replacementCache.set(search.query, promise);
-    promise.then((pool) => {
-      if (pool === null) replacementCache.delete(search.query); // don't remember failures
-    });
-  }
-  return replacementCache.get(search.query).then((pool) => {
+  return searchPool(search.query).then((pool) => {
     if (pool === null) return null;
     // Filtered fresh each time, so the list reflects the deck as it is right now.
     const usable = pool.filter(
@@ -1435,8 +1503,7 @@ function renderBracket(deck, comboInfo) {
     ? " Two-card combos aren't included yet."
     : "";
 
-  const panel = el("bracket-panel");
-  panel.innerHTML = `
+  el("bracket-summary").innerHTML = `
     <div class="bracket-head">
       <span class="bracket-badge bracket-${est.bracket}">Bracket ${est.bracket}</span>
       <span class="bracket-name">${BRACKET_NAMES[est.bracket]}</span>
@@ -1449,7 +1516,8 @@ function renderBracket(deck, comboInfo) {
       <summary>How this is estimated</summary>
       <p>Based on Wizards of the Coast's Commander Brackets. Game Changers come from Scryfall's flag on each card. Extra-turn spells are found from card text and mass land denial from a list of known cards. Two-card combos come from Commander Spellbook: its Ruthless-rated combos are treated as fast (Bracket 4), and Spicy or Powerful ones as fine for Bracket 3. Bracket 1 is for themed or low-power decks and Bracket 5 is competitive (cEDH), so this only reports 2 to 4. Your pod's conversation matters more than any number here.</p>
     </details>`;
-  panel.classList.remove("hidden");
+  el("bracket-panel").classList.remove("hidden");
+  syncBracketControls(deck, est, comboInfo);
 }
 
 const bracketComboCache = new Map(); // deck key -> {status: "ok", combos}
@@ -1467,6 +1535,7 @@ function updateBracket(deck) {
   const token = ++bracketToken;
   clearTimeout(bracketTimer);
   const key = bracketDeckKey(deck);
+  noteDeckForAdjust(deck, key);
   const cached = bracketComboCache.get(key);
   renderBracket(deck, cached || { status: "pending" });
   if (cached) return;
@@ -1494,6 +1563,259 @@ async function fetchBracketCombos(deck, key) {
     return { status: "unavailable" };
   }
 }
+
+// ---------- Adjusting the deck toward a target bracket ----------
+//
+// The slider lowers the deck's bracket by swapping out the cards that raised it: Game Changers
+// beyond what the target allows (the least popular go first, and cards you added yourself are
+// kept longest), mass land denial, extra-turn spells beyond two, and one card from each
+// two-card combo the target doesn't allow. Each card is replaced in place with a popular card
+// for the same job that has none of those problems, so the deck stays at 100. Bracket 4 has no
+// limits, so there is nothing to remove for it, and raising a deck's bracket isn't offered.
+
+const bracketSlider = el("bracket-slider");
+const bracketApplyBtn = el("bracket-apply");
+const bracketUndoBtn = el("bracket-undo");
+const bracketNoteEl = el("bracket-target-note");
+const bracketResultEl = el("bracket-result");
+
+const REASON_LABEL = {
+  gc: ["Game Changer", "Game Changers"],
+  mld: ["mass land denial card", "mass land denial cards"],
+  xt: ["extra-turn spell", "extra-turn spells"],
+  combo: ["card from a two-card combo", "cards from two-card combos"],
+};
+const plural = (n, [one, many]) => `${n} ${n === 1 ? one : many}`;
+
+let sliderTouched = false; // false: the slider just follows the deck's current estimate
+let adjustBusy = false;
+let adjustDeck = null; // the deck the controls are currently about
+let adjustView = null; // { deck, est, comboInfo } from the latest estimate
+let undoState = null; // { deck, snapshot, key } while the last adjustment can be undone
+
+// Which cards to swap out to reach `target`. `stuck` holds cards we already failed to replace.
+function planAdjustment(deck, target, comboInfo, stuck = new Set()) {
+  if (target >= 4) return [];
+  const entries = deck.groups.flatMap((group) =>
+    group.isBasics ? [] : group.cards.map((card, index) => ({ card, group, index }))
+  );
+  // Lower = keep longer: your own additions first, then the most popular cards.
+  const keepScore = (e) => (e.group.isAdded ? 0 : 1e10) + (e.card.edhrec_rank ?? 1e9);
+  const byKeep = (list) => [...list].sort((a, b) => keepScore(a) - keepScore(b));
+  const nameOf = (e) => frontFace(e.card.name).toLowerCase();
+
+  const chosen = new Map(); // entry -> reason
+  const remove = (e, reason) => {
+    if (!stuck.has(e.card.name) && !chosen.has(e)) chosen.set(e, reason);
+  };
+
+  entries.filter((e) => MASS_LAND_DENIAL.has(nameOf(e))).forEach((e) => remove(e, "mld"));
+  byKeep(entries.filter((e) => isExtraTurnCard(e.card))).slice(2).forEach((e) => remove(e, "xt"));
+
+  const allowed = (target === 2 ? 0 : 3) - (deck.commander.game_changer ? 1 : 0);
+  byKeep(entries.filter((e) => e.card.game_changer)).slice(Math.max(0, allowed)).forEach((e) => remove(e, "gc"));
+
+  if (comboInfo.status === "ok") {
+    const banned = comboInfo.combos.filter(
+      (c) => c.cards.length === 2 && (target === 2 ? COMBO_TAG_LABEL[c.bracketTag] : c.bracketTag === "R")
+    );
+    for (const combo of banned) {
+      const pieces = combo.cards.map((n) => entries.find((e) => nameOf(e) === frontFace(n).toLowerCase())).filter(Boolean);
+      if (!pieces.length || pieces.some((p) => chosen.has(p))) continue; // gone already, or the commander is one half
+      const candidates = pieces.filter((p) => !stuck.has(p.card.name));
+      if (candidates.length) remove(byKeep(candidates).pop(), "combo");
+    }
+  }
+  return [...chosen].map(([e, reason]) => ({ ...e, reason }));
+}
+
+const describePlan = (plan) => {
+  const counts = {};
+  plan.forEach((p) => (counts[p.reason] = (counts[p.reason] || 0) + 1));
+  return Object.keys(REASON_LABEL).filter((r) => counts[r]).map((r) => plural(counts[r], REASON_LABEL[r])).join(", ");
+};
+
+// A popular card for the same job, without the traits we're removing. Tries the same search the
+// Replacements tab uses, then the same card type at any cost.
+async function pickReplacement(deck, item, taken) {
+  const usable = (c) =>
+    !c.game_changer && !isExtraTurnCard(c) && !MASS_LAND_DENIAL.has(frontFace(c.name).toLowerCase()) &&
+    !taken.has(c.name) && !deckHasCard(deck, c.name);
+  const search = replacementSearch(item.card, { group: item.group, index: item.index });
+  if (!search) return null;
+
+  const queries = [{ query: `${search.query} -is:gamechanger`, landsOnly: !!search.landsOnly }];
+  const category = cardTypeCategory(item.card);
+  if (!search.landsOnly && TYPE_QUERY[category]) {
+    const base = `${identityQueryFragment(deck.identity)} legal:commander -is:commander game:paper`;
+    queries.push({ query: `${base} ${TYPE_QUERY[category]} -is:gamechanger order:edhrec`, landsOnly: false });
+  }
+  for (const q of queries) {
+    const pool = await searchPool(q.query);
+    const found = pool && pool.find((c) => usable(c) && (!q.landsOnly || isLandRelevant(c, deck.identity)));
+    if (found) return found;
+  }
+  return null;
+}
+
+// Swaps out whatever keeps `deck` above `target`, in place. It needs currentDeck to be `deck`
+// (the replacement searches read its colors). Returns what it did; the caller shows it.
+async function runAdjustment(deck, target, onProgress = () => {}) {
+  const swaps = [];
+  const stuck = new Set(); // cards no replacement could be found for
+  let comboChecked = true;
+  let failed = false;
+  try {
+    // A few passes: a replacement can itself, rarely, complete a combo.
+    for (let pass = 0; pass < 3; pass++) {
+      const key = bracketDeckKey(deck);
+      const info = bracketComboCache.get(key) || (await fetchBracketCombos(deck, key));
+      if (info.status !== "ok") comboChecked = false;
+      const plan = planAdjustment(deck, target, info, stuck);
+      if (!plan.length) break;
+
+      onProgress(`Replacing ${plural(plan.length, ["card", "cards"])}…`);
+      const taken = new Set();
+      let changed = 0;
+      for (const item of plan) {
+        if (item.group.cards[item.index] !== item.card) continue;
+        const replacement = await pickReplacement(deck, item, taken);
+        if (!replacement) {
+          stuck.add(item.card.name);
+          continue;
+        }
+        item.group.cards[item.index] = replacement;
+        taken.add(replacement.name);
+        swaps.push({ from: item.card, to: replacement, reason: item.reason });
+        changed++;
+      }
+      if (!changed) break;
+    }
+  } catch {
+    failed = true; // keep whatever was swapped so far, and say so
+  }
+  return { swaps, stuck: [...stuck], comboChecked, failed };
+}
+
+async function adjustDeckToBracket(deck, target) {
+  if (adjustBusy || !deck || target >= 4) return;
+  adjustBusy = true;
+  clearAdjustResult();
+  refreshAdjustControls();
+
+  const snapshot = deck.groups.map((g) => g.cards.slice());
+  const { swaps, stuck, comboChecked, failed } = await runAdjustment(deck, target, (text) => {
+    bracketNoteEl.textContent = text;
+  });
+
+  adjustBusy = false;
+  sliderTouched = false;
+  bracketNoteEl.textContent = "";
+  if (swaps.length) {
+    undoState = { deck, snapshot, key: null };
+    renderDeck(deck);
+    undoState.key = bracketDeckKey(deck);
+    bracketUndoBtn.classList.remove("hidden");
+  } else {
+    refreshAdjustControls();
+  }
+  showAdjustResult(deck, target, swaps, stuck, comboChecked, failed);
+}
+
+// `built` is for a deck that was just built for the target: any swaps here are the combo
+// check that runs after the picks, not an adjustment the person asked for.
+function showAdjustResult(deck, target, swaps, stuck, comboChecked, failed, built = false) {
+  const est = adjustView && adjustView.est;
+  const lines = [];
+  if (built) {
+    const fixed = swaps.length ? ` ${plural(swaps.length, ["card was", "cards were"])} then swapped to break up a two-card combo.` : "";
+    lines.push(`<p>Built to fit Bracket ${target}.${fixed}</p>`);
+  } else if (swaps.length) {
+    const now = est ? ` The deck now reads as Bracket ${est.bracket}${est.bracket > target ? `, not Bracket ${target}` : ""}.` : "";
+    lines.push(`<p>Replaced ${plural(swaps.length, ["card", "cards"])}.${now}</p>`);
+  } else {
+    lines.push("<p>No cards were changed.</p>");
+  }
+  const warn = (text) => lines.push(`<p class="result-warn">${escapeHtml(text)}</p>`);
+  if (failed) warn("Something went wrong partway through, so the adjustment may be incomplete.");
+  if (stuck.length) warn(`No suitable replacement was found for ${stuck.join(", ")}.`);
+  if (est && est.bracket > target) {
+    if (est.why.length) warn(`Still held at Bracket ${est.bracket} by ${est.why[0].text}.`);
+    if (deck.commander.game_changer) warn("The commander itself is a Game Changer, and it can't be swapped out.");
+  }
+  if (!comboChecked) warn("Two-card combos couldn't be checked, so those weren't adjusted.");
+  if (swaps.length) {
+    const items = swaps
+      .map((s) => `<li>${escapeHtml(s.from.name)} → ${escapeHtml(s.to.name)} <small>(${REASON_LABEL[s.reason][0]})</small></li>`)
+      .join("");
+    lines.push(`<details><summary>See what changed</summary><ul>${items}</ul></details>`);
+  }
+  bracketResultEl.innerHTML = lines.join("");
+}
+
+function clearAdjustResult() {
+  undoState = null;
+  bracketResultEl.replaceChildren();
+  bracketUndoBtn.classList.add("hidden");
+}
+
+// Called on every deck render: a different deck (a rebuild) resets the controls, and any edit
+// made after an adjustment retires its Undo, since restoring would throw those edits away.
+function noteDeckForAdjust(deck, key) {
+  if (deck !== adjustDeck) {
+    adjustDeck = deck;
+    sliderTouched = false;
+    clearAdjustResult();
+  } else if (undoState && undoState.key && undoState.key !== key) {
+    clearAdjustResult();
+  }
+}
+
+function syncBracketControls(deck, est, comboInfo) {
+  adjustView = { deck, est, comboInfo };
+  if (!sliderTouched && !adjustBusy) bracketSlider.value = String(est.bracket);
+  refreshAdjustControls();
+}
+
+function refreshAdjustControls() {
+  if (!adjustView) return;
+  const { deck, est, comboInfo } = adjustView;
+  const target = Number(bracketSlider.value);
+  const lower = target < est.bracket;
+  bracketSlider.disabled = adjustBusy;
+  bracketSlider.setAttribute("aria-valuetext", `Bracket ${target}, ${BRACKET_NAMES[target]}`);
+  bracketApplyBtn.disabled = adjustBusy || !lower;
+  bracketApplyBtn.textContent = adjustBusy ? "Adjusting…" : lower ? `Adjust deck to Bracket ${target}` : "Adjust deck";
+  if (adjustBusy) return;
+
+  if (lower) {
+    const plan = planAdjustment(deck, target, comboInfo);
+    bracketNoteEl.textContent = plan.length
+      ? `This would replace ${plural(plan.length, ["card", "cards"])}: ${describePlan(plan)}.`
+      : "Nothing obvious to swap out yet; adjusting will check again.";
+  } else if (sliderTouched) {
+    bracketNoteEl.textContent = est.bracket <= 2
+      ? "Already Bracket 2, the lowest this tool goes."
+      : `Already Bracket ${est.bracket}. Pick a lower target to swap cards out.`;
+  } else {
+    bracketNoteEl.textContent = "";
+  }
+}
+
+bracketSlider.addEventListener("input", () => {
+  sliderTouched = true;
+  refreshAdjustControls();
+});
+bracketApplyBtn.addEventListener("click", () => adjustDeckToBracket(currentDeck, Number(bracketSlider.value)));
+bracketUndoBtn.addEventListener("click", () => {
+  if (!undoState || undoState.deck !== currentDeck || adjustBusy) return;
+  const { deck, snapshot } = undoState;
+  deck.groups.forEach((g, i) => g.cards.splice(0, g.cards.length, ...snapshot[i]));
+  clearAdjustResult();
+  sliderTouched = false;
+  showToast("Put the deck back the way it was.");
+  renderDeck(deck);
+});
 
 const rulingsCache = new Map();
 async function fetchRulings(card) {

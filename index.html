@@ -35,6 +35,16 @@
           <p id="archetype-desc" class="archetype-desc"></p>
         </div>
 
+        <div class="archetype-row">
+          <label for="bracket-select">Target bracket</label>
+          <select id="bracket-select">
+            <option value="2">Bracket 2 · Core</option>
+            <option value="3">Bracket 3 · Upgraded</option>
+            <option value="4" selected>Bracket 4 · Optimized (no limits)</option>
+          </select>
+          <p id="bracket-select-desc" class="archetype-desc"></p>
+        </div>
+
         <div class="actions">
           <button id="build-btn">Build Deck</button>
           <button id="change-btn" class="secondary">Change Commander</button>
@@ -63,7 +73,22 @@
           <button id="copy-btn" class="secondary">Copy Decklist</button>
         </div>
       </div>
-      <div id="bracket-panel" class="bracket-panel hidden" aria-live="polite"></div>
+      <div id="bracket-panel" class="bracket-panel hidden">
+        <div id="bracket-summary" aria-live="polite"></div>
+        <div class="bracket-target">
+          <label for="bracket-slider">Target bracket</label>
+          <div class="bracket-slider-row">
+            <div class="slider-wrap">
+              <input type="range" id="bracket-slider" min="2" max="4" step="1" value="4" aria-describedby="bracket-target-note" />
+              <div class="slider-ticks" aria-hidden="true"><span>2 Core</span><span>3 Upgraded</span><span>4 Optimized</span></div>
+            </div>
+            <button type="button" id="bracket-apply" class="secondary" disabled>Adjust deck</button>
+            <button type="button" id="bracket-undo" class="secondary hidden">Undo</button>
+          </div>
+          <p id="bracket-target-note" class="bracket-hint"></p>
+          <div id="bracket-result" class="bracket-result" aria-live="polite"></div>
+        </div>
+      </div>
       <div id="curve-chart" class="curve-chart"></div>
 
       <div class="view-toggle" id="view-toggle">

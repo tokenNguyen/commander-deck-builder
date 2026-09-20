@@ -946,6 +946,52 @@ function renderDeck(deck) {
   el("deck-panel").classList.remove("hidden");
   currentDeck = deck;
   updateBracket(deck);
+  updateDeckValue(deck);
+}
+
+// The whole deck's estimated value: each card's price (the one shown under it) times how many
+// copies it has, added up. Cards with no price at all are left out and counted separately.
+let deckValueToken = 0; // a slow lookup notices the deck changed again and steps aside
+async function updateDeckValue(deck) {
+  const token = ++deckValueToken;
+  const box = el("deck-value");
+  if (!box.textContent) box.textContent = "Estimating value…";
+
+  const entries = [deck.commander, ...deck.groups.flatMap((g) => g.cards)].map((card) => ({ card, qty: card.qty || 1 }));
+  const fx = await fetchUsdToCad();
+  if (token !== deckValueToken) return;
+
+  // Add up the amounts as they're shown on the tiles (whole cents), so the numbers agree.
+  const each = (usd) => (fx ? Math.round(usd * fx.rate * 100) / 100 : usd);
+  const show = (total, noteText) => {
+    const amount = document.createElement("strong");
+    amount.textContent = `${fx ? "≈ " : ""}${formatAmount(total, fx)}`;
+    const note = document.createElement("span");
+    note.className = "deck-value-note";
+    note.textContent = noteText;
+    box.replaceChildren("Estimated value: ", amount, note);
+  };
+
+  // Cards whose shown printing has a price count straight away; the rest need a lookup for a
+  // cheaper printing, which can take several seconds, so show what we have meanwhile.
+  let quick = 0;
+  let waiting = 0;
+  entries.forEach((e) => {
+    const prices = cardPrices(e.card);
+    if (prices.length) quick += each(prices[0].usd) * e.qty;
+    else waiting += e.qty;
+  });
+  if (waiting) show(quick, ` so far, still pricing ${plural(waiting, ["card", "cards"])}…`);
+
+  const infos = await Promise.all(entries.map((e) => resolveCardPrice(e.card)));
+  if (token !== deckValueToken) return;
+  let total = 0;
+  let unpriced = 0;
+  entries.forEach((e, i) => {
+    if (infos[i]) total += each(infos[i].main.usd) * e.qty;
+    else unpriced += e.qty;
+  });
+  show(total, unpriced ? ` ${plural(unpriced, ["card has", "cards have"])} no price and ${unpriced === 1 ? "isn't" : "aren't"} counted.` : "");
 }
 
 // Renders an actual card image (not a text row) for every card, including basic lands
@@ -970,6 +1016,10 @@ function cardTile(card, qty, ctx) {
   } else {
     tile.appendChild(missingArtLabel(card.name));
   }
+  const price = document.createElement("div");
+  price.className = "card-price";
+  tile.appendChild(price);
+  fillCardPrice(price, card, qty);
   if (qty > 1) {
     const badge = document.createElement("span");
     badge.className = "qty-badge";
@@ -1155,33 +1205,80 @@ function fetchCheapestPrinting(card) {
   return cheapestPrintingCache.get(card.oracle_id);
 }
 
+// Fallback lookups go one at a time, a beat apart, so a deck with several unpriced cards
+// doesn't hit Scryfall with a burst of requests.
+let cheapestChain = Promise.resolve();
+function fetchCheapestPrintingQueued(card) {
+  if (!card.oracle_id || cheapestPrintingCache.has(card.oracle_id)) return fetchCheapestPrinting(card);
+  const run = cheapestChain.then(() => fetchCheapestPrinting(card));
+  cheapestChain = run.then(() => sleep(100));
+  return run;
+}
+
+// The price shown for a card everywhere (under its tile, in the details window and in the
+// deck total): { main, others, fallbackSet } or null when no printing has a price.
+const priceCache = new Map(); // card id (or name) -> Promise<info | null>
+function resolveCardPrice(card) {
+  const key = card.id || card.name;
+  if (!priceCache.has(key)) {
+    const promise = (async () => {
+      let prices = cardPrices(card);
+      let fallbackSet = null;
+      if (!prices.length) {
+        const cheapest = await fetchCheapestPrintingQueued(card);
+        if (!cheapest) return null;
+        prices = cardPrices(cheapest);
+        fallbackSet = cheapest.set_name;
+      }
+      return prices.length ? { main: prices[0], others: prices.slice(1), fallbackSet } : null;
+    })();
+    priceCache.set(key, promise);
+    promise.then((info) => {
+      if (!info) priceCache.delete(key); // maybe a failed lookup; try again next time
+    });
+  }
+  return priceCache.get(key);
+}
+
+// `amount` is already in the shown currency: CAD when there's an exchange rate, otherwise USD.
+const cents = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
+const formatAmount = (amount, fx) =>
+  fx ? `$${amount.toLocaleString("en-CA", cents)} CAD` : `US$${amount.toLocaleString("en-US", cents)}`;
+const formatMoney = (usd, fx) => formatAmount(fx ? usd * fx.rate : usd, fx);
+const priceText = (main, fx) => `${fx ? "≈ " : ""}${formatMoney(main.usd, fx)}${main.label ? ` (${main.label})` : ""}`;
+
+// Fills an element with a card's price, the same text as at the top of its details window.
+async function fillCardPrice(target, card, qty = 1) {
+  const [info, fx] = await Promise.all([resolveCardPrice(card), fetchUsdToCad()]);
+  if (!info) {
+    target.textContent = "No price";
+    target.classList.add("none");
+    return;
+  }
+  target.textContent = priceText(info.main, fx) + (qty > 1 ? " ea" : "");
+  target.classList.remove("none");
+}
+
 async function renderPrice(card, token) {
   modalPriceEl.classList.add("hidden");
   modalPriceEl.textContent = "";
   const stale = () => !modalState || modalState.token !== token; // window moved on while we waited
 
-  let prices = cardPrices(card);
-  let fallbackSet = null;
-  if (!prices.length) {
-    const cheapest = await fetchCheapestPrinting(card);
-    if (stale() || !cheapest) return;
-    prices = cardPrices(cheapest);
-    fallbackSet = cheapest.set_name;
-  }
-  if (!prices.length) return;
+  const info = await resolveCardPrice(card);
+  if (stale() || !info) return;
 
   const fx = await fetchUsdToCad();
   if (stale()) return;
 
+  const { main, others, fallbackSet } = info;
   const usd = (n) => `US$${n.toFixed(2)}`;
-  const show = (p) => (fx ? `$${(p.usd * fx.rate).toFixed(2)} CAD` : usd(p.usd));
-  const [main, ...others] = prices;
+  const show = (p) => formatMoney(p.usd, fx);
 
   const line = document.createElement("div");
   line.className = "price-line";
   const mainEl = document.createElement("span");
   mainEl.className = "price-main";
-  mainEl.textContent = `${fx ? "≈ " : ""}${show(main)}${main.label ? ` (${main.label})` : ""}`;
+  mainEl.textContent = priceText(main, fx);
   line.appendChild(mainEl);
   others.forEach((p) => {
     const alt = document.createElement("span");
@@ -1291,13 +1388,16 @@ function renderReplacements(result, card, ctx) {
     name.className = "suggestion-name";
     name.textContent = c.name;
     if (c.game_changer) name.appendChild(gameChangerBadge());
+    const price = document.createElement("div");
+    price.className = "card-price";
+    fillCardPrice(price, c);
     const swap = document.createElement("button");
     swap.type = "button";
     swap.className = "secondary swap-btn";
     swap.textContent = "Swap in";
     swap.setAttribute("aria-label", `Swap ${card.name} for ${c.name}`);
     swap.addEventListener("click", () => swapCard(ctx, card, c));
-    item.append(name, swap);
+    item.append(name, price, swap);
     grid.appendChild(item);
   });
   modalPanelEl.appendChild(grid);

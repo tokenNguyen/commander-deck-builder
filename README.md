@@ -18,7 +18,12 @@ the [Scryfall API](https://scryfall.com/docs/api). One small serverless function
 
    Everything is sorted by EDHREC popularity rank, so you get real, playable staples
    rather than random cards. **Rebuild** reruns the same pipeline for fresh picks.
-4. Click any card to open a details window over the page (the deck stays visible,
+4. Every card shows its **estimated CAD price** underneath (basic lands show the price
+   of one copy, marked "ea"), and the deck header adds up an **estimated value** for the
+   whole deck. The total updates as you add, remove or swap cards. Cards with no price on
+   any printing aren't counted, and the header says how many. If the exchange rate can't
+   be loaded, everything shows in US dollars instead.
+5. Click any card to open a details window over the page (the deck stays visible,
    dimmed, behind it) with a large image, an **estimated CAD price** (Scryfall's USD
    price converted at the day's rate from [Frankfurter](https://frankfurter.dev); real
    Canadian store prices are usually higher), and three tabs: official **Rulings**,
@@ -27,7 +32,7 @@ the [Scryfall API](https://scryfall.com/docs/api). One small serverless function
    new card in the old one's slot. Drag cards to add or remove them (see the hint
    above the deck). **Copy Decklist** copies a plain text list (works with Moxfield,
    Archidekt, TappedOut, etc.).
-5. **Game Changers and estimated bracket.** Scryfall flags Wizards' Game Changer cards
+6. **Game Changers and estimated bracket.** Scryfall flags Wizards' Game Changer cards
    (`game_changer` on each card), so they get a gold **GC** badge on their tile, in the
    details window and in swap suggestions. Above the deck, an estimate of the deck's
    [Commander Bracket](https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta)
@@ -36,7 +41,7 @@ the [Scryfall API](https://scryfall.com/docs/api). One small serverless function
    two-card combos (via Commander Spellbook: fast "Ruthless" ones push it to 4). It updates
    whenever you add, remove or swap a card. It's a guide only: it can't tell Bracket 1
    from 2 or 4 from 5.
-6. **Target bracket at build time.** The **Target bracket** menu next to the archetype
+7. **Target bracket at build time.** The **Target bracket** menu next to the archetype
    (2 Core, 3 Upgraded, or 4 with no limits, the default) makes **Build Deck** and
    **Rebuild** respect that bracket from the start. Restricted cards are skipped while
    picking, so the next-best card in each category takes the slot: Bracket 2 uses no Game
@@ -44,7 +49,7 @@ the [Scryfall API](https://scryfall.com/docs/api). One small serverless function
    both skip mass land denial and cap extra-turn spells at two. Two-card combos can't be
    ruled out card by card, so the finished deck is checked and one piece of any combo the
    target doesn't allow is swapped.
-7. **Target bracket slider.** Drag it to a lower bracket and press **Adjust deck** to swap
+8. **Target bracket slider.** Drag it to another bracket and press **Adjust deck** to swap
    out whatever holds the deck above it: Game Changers beyond the target's limit (the
    least popular go first; cards you added yourself are kept longest), mass land denial,
    extra-turn spells beyond two, and one card from each two-card combo the target doesn't

@@ -522,6 +522,27 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .bracket-facts .fact-ok .fact-value { color: #8fc28f; }
 .bracket-facts .fact-warn .fact-value { color: #d7b56d; }
 .bracket-facts .fact-hot .fact-value { color: #e58a70; }
+.budget-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px 14px; margin-top: 10px; }
+.budget-panel .bracket-hint { margin-top: 10px; }
+.budget-panel .bracket-hint:empty { display: none; }
+.budget-field { display: flex; align-items: center; gap: 6px; color: #9aa4b2; font-size: 14px; }
+.budget-field input {
+  width: 110px;
+  padding: 9px 10px;
+  font-size: 14px;
+  background: #212733;
+  border: 1px solid #2c3340;
+  border-radius: 7px;
+  color: #e8ebf0;
+  outline: none;
+}
+.budget-field input:focus { border-color: #6b7280; }
+.budget-unit { font-size: 12px; color: #6b7280; }
+.archetype-row .budget-field input { width: 120px; }
+.group-meta { display: flex; align-items: baseline; gap: 10px; }
+.group-value { font-size: 13px; font-weight: 400; color: #9aa4b2; }
+.group-value:empty { display: none; }
+
 .bracket-target { margin-top: 14px; padding-top: 12px; border-top: 1px solid #232a35; }
 .bracket-target label { display: block; margin-bottom: 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase; color: #6b7280; }
 .bracket-slider-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px 14px; }

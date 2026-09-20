@@ -45,6 +45,16 @@
           <p id="bracket-select-desc" class="archetype-desc"></p>
         </div>
 
+        <div class="archetype-row">
+          <label for="build-budget">Budget (optional)</label>
+          <div class="budget-field">
+            <span aria-hidden="true">$</span>
+            <input type="number" id="build-budget" min="1" step="10" inputmode="decimal" placeholder="No limit" />
+            <span class="budget-unit">CAD, estimated</span>
+          </div>
+          <p class="archetype-desc">Keeps the deck's estimated price at or under this, swapping pricey cards for cheaper ones that do the same job. The target bracket is kept even if that means going over.</p>
+        </div>
+
         <div class="actions">
           <button id="build-btn">Build Deck</button>
           <button id="change-btn" class="secondary">Change Commander</button>
@@ -89,6 +99,26 @@
           <p id="bracket-target-note" class="bracket-hint"></p>
           <div id="bracket-result" class="bracket-result" aria-live="polite"></div>
         </div>
+      </div>
+      <div id="budget-panel" class="bracket-panel budget-panel hidden">
+        <div class="bracket-head">
+          <span class="bracket-name">Budget</span>
+          <span class="bracket-est">estimated CAD</span>
+        </div>
+        <div class="budget-row">
+          <div class="budget-field">
+            <span aria-hidden="true">$</span>
+            <input type="number" id="budget-input" min="1" step="5" inputmode="decimal" placeholder="No limit" aria-label="Budget in estimated Canadian dollars" aria-describedby="budget-note" />
+          </div>
+          <div class="slider-wrap">
+            <input type="range" id="budget-slider" min="25" max="500" step="5" value="500" aria-label="Budget slider" />
+            <div class="slider-ticks" aria-hidden="true"><span>$25</span><span id="budget-tick-max">$500</span></div>
+          </div>
+          <button type="button" id="budget-apply" class="secondary" disabled>Adjust to budget</button>
+          <button type="button" id="budget-undo" class="secondary hidden">Undo</button>
+        </div>
+        <p id="budget-note" class="bracket-hint" aria-live="polite"></p>
+        <div id="budget-result" class="bracket-result" aria-live="polite"></div>
       </div>
       <div id="curve-chart" class="curve-chart"></div>
 

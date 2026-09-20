@@ -133,8 +133,7 @@ async function fetchCardByName(name) {
 
 // Basic land entries start as plain {name, qty} — fetch each distinct basic's real
 // card data once so it renders as an actual card image, not a placeholder box.
-async function fetchBasicLandCards(entries) {
-  const cache = new Map();
+async function fetchBasicLandCards(entries, cache = new Map()) {
   const result = [];
   for (const entry of entries) {
     if (!cache.has(entry.name)) {
@@ -529,7 +528,9 @@ async function buildDeck() {
   try {
     const archetype = resolveArchetype(archetypeSelect.value);
     const bracketTarget = Number(bracketSelect.value) || 4;
-    const targets = { ...DEFAULT_TARGETS, ...(archetype.targets || {}) };
+    const budget = parseBudget(el("build-budget").value); // estimated CAD, or null for no limit
+    const basicCache = new Map(); // basic land card data, fetched once however many passes run
+    const targets ={ ...DEFAULT_TARGETS, ...(archetype.targets || {}) };
     const extraFilter = archetype.extraFilter ? ` ${archetype.extraFilter}` : "";
 
     const identity = selectedCommander.color_identity || [];
@@ -594,14 +595,24 @@ async function buildDeck() {
     // One full pass of picking the 99. `allowGc` is the set of Game Changer names that may be
     // picked (null for any), so a target bracket can rule cards out before they are chosen
     // rather than after: the next-best card in each pool takes the slot instead.
-    const assemble = async (allowGc) => {
+    const assemble = async (allowGc, capUsd = Infinity) => {
       const used = new Set([normalizeName(selectedCommander.name)]);
       let extraTurns = 0;
       let synergyNote = themeNote;
 
+      // With a budget, cards priced above `capUsd` are passed over so the next-best card takes
+      // the slot. Game Changers are exempt: the budget trim handles those, because the target
+      // bracket may need some of them. A card with no price on its shown printing is allowed.
+      const withinCap = (c) => {
+        if (capUsd === Infinity || c.game_changer) return true;
+        const price = cardPrices(c)[0];
+        return !price || price.usd <= capUsd;
+      };
+
       // Bracket 4 has no card limits. Below it: no mass land denial, at most two extra-turn
       // spells (the same limits the bracket estimate uses), and only the allowed Game Changers.
       const isAllowed = (c) => {
+        if (!withinCap(c)) return false;
         if (bracketTarget >= 4) return true;
         if (MASS_LAND_DENIAL.has(frontFace(c.name).toLowerCase())) return false;
         if (c.game_changer && allowGc && !allowGc.has(c.name)) return false;
@@ -722,7 +733,7 @@ async function buildDeck() {
       const basics = buildBasicLands(identity, [...nonlandCards, selectedCommander], basicsNeeded);
 
       await setStatus("Fetching basic land art...");
-      const basicCards = await fetchBasicLandCards(basics.entries);
+      const basicCards = await fetchBasicLandCards(basics.entries, basicCache);
 
       const groups = [
         { name: "Ramp", cards: ramp },
@@ -750,15 +761,52 @@ async function buildDeck() {
     // Bracket 2 allows no Game Changers. Bracket 3 allows three: build once with any allowed,
     // then, if the deck ran past that, build again keeping only the most popular of the ones
     // it picked (the commander itself counts if it is one).
-    let deck = await assemble(bracketTarget === 2 ? new Set() : null);
-    if (bracketTarget === 3) {
-      const room = Math.max(0, 3 - (selectedCommander.game_changer ? 1 : 0));
-      const picked = deck.groups.flatMap((g) => g.cards).filter((c) => c.game_changer);
-      if (picked.length > room) {
-        await setStatus("Trimming Game Changers for Bracket 3...");
-        picked.sort((a, b) => (a.edhrec_rank ?? 1e9) - (b.edhrec_rank ?? 1e9));
-        deck = await assemble(new Set(picked.slice(0, room).map((c) => c.name)));
+    const assembleForBracket = async (capUsd) => {
+      let d = await assemble(bracketTarget === 2 ? new Set() : null, capUsd);
+      if (bracketTarget === 3) {
+        const room = Math.max(0, 3 - (selectedCommander.game_changer ? 1 : 0));
+        const picked = d.groups.flatMap((g) => g.cards).filter((c) => c.game_changer);
+        if (picked.length > room) {
+          await setStatus("Trimming Game Changers for Bracket 3...");
+          picked.sort((a, b) => (a.edhrec_rank ?? 1e9) - (b.edhrec_rank ?? 1e9));
+          d = await assemble(new Set(picked.slice(0, room).map((c) => c.name)), capUsd);
+        }
       }
+      return d;
+    };
+
+    // With a budget, find the highest per-card price ceiling whose deck (leaving the Game
+    // Changers aside) fits. It starts from a guess and moves up or down a few steps; the trim
+    // below then settles whatever is left, including the Game Changers.
+    const budgetFx = budget ? await fetchUsdToCad() : null;
+    const CAP_TIERS = [1, 2, 3, 5, 8, 12, 20, 35, 60, Infinity];
+    let deck;
+    if (budget && budgetFx) {
+      const commanderUsd = (cardPrices(selectedCommander)[0] || { usd: 0 }).usd;
+      const perCard = Math.max(0.5, (budget / budgetFx.rate - commanderUsd) / 99);
+      let tier = CAP_TIERS.reduce((best, t, i) => (t <= perCard * 3 ? i : best), 0);
+      const nonGcCad = (d) => {
+        const each = (c) => (c.game_changer ? 0 : (cardPrices(c)[0] || { usd: 0.5 }).usd * budgetFx.rate);
+        return each(d.commander) + d.groups.reduce((s, g) => s + g.cards.reduce((t, c) => t + each(c) * (c.qty || 1), 0), 0);
+      };
+      const fits = (d) => nonGcCad(d) <= budget;
+      await setStatus("Fitting the budget...");
+      deck = await assembleForBracket(CAP_TIERS[tier]);
+      if (fits(deck)) {
+        for (let up = 0; up < 2 && tier < CAP_TIERS.length - 1; up++) {
+          const looser = await assembleForBracket(CAP_TIERS[tier + 1]);
+          if (!fits(looser)) break;
+          deck = looser;
+          tier++;
+        }
+      } else {
+        for (let down = 0; down < 4 && tier > 0 && !fits(deck); down++) {
+          tier--;
+          deck = await assembleForBracket(CAP_TIERS[tier]);
+        }
+      }
+    } else {
+      deck = await assembleForBracket(Infinity);
     }
 
     // Two-card combos can't be ruled out card by card, so check the finished deck and swap
@@ -770,9 +818,26 @@ async function buildDeck() {
       fix = await runAdjustment(deck, bracketTarget);
     }
 
+    // Trim to the budget last. The target bracket is a floor: if the deck reads lower than the
+    // target already, that lower reading is the floor, and it is never taken below either.
+    let budgetResult = null;
+    if (budget) {
+      await setStatus("Trimming to the budget...");
+      currentDeck = deck;
+      const floor = Math.min(bracketTarget, estimateBracket(deck, knownComboInfo(deck)).bracket);
+      budgetResult = await runBudgetAdjustment(deck, budget, floor, (text) => {
+        el("status-text").textContent = text;
+      });
+    }
+
     currentDeck = deck;
     renderDeck(deck);
     if (fix) showAdjustResult(deck, bracketTarget, fix.swaps, fix.stuck, fix.comboChecked, fix.failed, true);
+    if (budgetResult) {
+      budgetInput.value = String(budget);
+      refreshBudgetControls();
+      showBudgetResult(budgetResult, true);
+    }
   } catch (err) {
     el("status-text").textContent = "Something went wrong: " + err.message;
     console.error(err);
@@ -929,7 +994,8 @@ function renderDeck(deck) {
     const count = dg.entries.reduce((s, e) => s + e.qty, 0);
     const wrap = document.createElement("div");
     wrap.className = "deck-group";
-    wrap.innerHTML = `<h3><span>${escapeHtml(dg.name)}</span><span>${count}</span></h3>`;
+    wrap.innerHTML = `<h3><span>${escapeHtml(dg.name)}</span><span class="group-meta"><span class="group-value"></span><span>${count}</span></span></h3>`;
+    fillGroupValue(wrap.querySelector(".group-value"), dg.entries);
     const grid = document.createElement("div");
     grid.className = "card-grid";
     dg.entries.forEach((entry) => {
@@ -952,8 +1018,20 @@ function renderDeck(deck) {
 // The whole deck's estimated value: each card's price (the one shown under it) times how many
 // copies it has, added up. Cards with no price at all are left out and counted separately.
 let deckValueToken = 0; // a slow lookup notices the deck changed again and steps aside
+let deckTotal = null; // { deck, total, fx } once the current deck is fully priced; the budget controls read it
+async function fillGroupValue(target, entries) {
+  const [fx, infos] = await Promise.all([fetchUsdToCad(), Promise.all(entries.map((e) => resolveCardPrice(e.card)))]);
+  let total = 0;
+  entries.forEach((e, i) => {
+    if (infos[i]) total += unitAmount(infos[i].main.usd, fx) * e.qty;
+  });
+  target.textContent = `${fx ? "≈ " : ""}${formatAmount(total, fx)}`;
+}
+
 async function updateDeckValue(deck) {
   const token = ++deckValueToken;
+  deckTotal = null;
+  refreshBudgetControls();
   const box = el("deck-value");
   if (!box.textContent) box.textContent = "Estimating value…";
 
@@ -962,7 +1040,7 @@ async function updateDeckValue(deck) {
   if (token !== deckValueToken) return;
 
   // Add up the amounts as they're shown on the tiles (whole cents), so the numbers agree.
-  const each = (usd) => (fx ? Math.round(usd * fx.rate * 100) / 100 : usd);
+  const each = (usd) => unitAmount(usd, fx);
   const show = (total, noteText) => {
     const amount = document.createElement("strong");
     amount.textContent = `${fx ? "≈ " : ""}${formatAmount(total, fx)}`;
@@ -992,6 +1070,8 @@ async function updateDeckValue(deck) {
     else unpriced += e.qty;
   });
   show(total, unpriced ? ` ${plural(unpriced, ["card has", "cards have"])} no price and ${unpriced === 1 ? "isn't" : "aren't"} counted.` : "");
+  deckTotal = { deck, total, fx };
+  refreshBudgetControls();
 }
 
 // Renders an actual card image (not a text row) for every card, including basic lands
@@ -1205,14 +1285,33 @@ function fetchCheapestPrinting(card) {
   return cheapestPrintingCache.get(card.oracle_id);
 }
 
-// Fallback lookups go one at a time, a beat apart, so a deck with several unpriced cards
-// doesn't hit Scryfall with a burst of requests.
-let cheapestChain = Promise.resolve();
+// Fallback lookups start a beat apart and at most four run at once, so a deck with a dozen
+// unpriced cards is done in a few seconds without hitting Scryfall with a burst of requests.
+const cheapestQueue = [];
+let cheapestActive = 0;
+let cheapestLastStart = 0;
+function pumpCheapest() {
+  while (cheapestActive < 4 && cheapestQueue.length) {
+    const wait = cheapestLastStart + 110 - Date.now();
+    if (wait > 0) {
+      setTimeout(pumpCheapest, wait);
+      return;
+    }
+    const { card, resolve } = cheapestQueue.shift();
+    cheapestActive++;
+    cheapestLastStart = Date.now();
+    fetchCheapestPrinting(card).then(resolve).finally(() => {
+      cheapestActive--;
+      pumpCheapest();
+    });
+  }
+}
 function fetchCheapestPrintingQueued(card) {
   if (!card.oracle_id || cheapestPrintingCache.has(card.oracle_id)) return fetchCheapestPrinting(card);
-  const run = cheapestChain.then(() => fetchCheapestPrinting(card));
-  cheapestChain = run.then(() => sleep(100));
-  return run;
+  return new Promise((resolve) => {
+    cheapestQueue.push({ card, resolve });
+    pumpCheapest();
+  });
 }
 
 // The price shown for a card everywhere (under its tile, in the details window and in the
@@ -1245,6 +1344,8 @@ const cents = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
 const formatAmount = (amount, fx) =>
   fx ? `$${amount.toLocaleString("en-CA", cents)} CAD` : `US$${amount.toLocaleString("en-US", cents)}`;
 const formatMoney = (usd, fx) => formatAmount(fx ? usd * fx.rate : usd, fx);
+// A card's price in whole cents of the shown currency, the way it's displayed and added up.
+const unitAmount = (usd, fx) => (fx ? Math.round(usd * fx.rate * 100) / 100 : usd);
 const priceText = (main, fx) => `${fx ? "≈ " : ""}${formatMoney(main.usd, fx)}${main.label ? ` (${main.label})` : ""}`;
 
 // Fills an element with a card's price, the same text as at the top of its details window.
@@ -1537,8 +1638,13 @@ function estimateBracket(deck, comboInfo) {
   const gameChangers = namesOf(cards.filter((c) => c.game_changer));
   const landDenial = namesOf(cards.filter((c) => MASS_LAND_DENIAL.has(frontFace(c.name).toLowerCase())));
   const extraTurns = namesOf(cards.filter(isExtraTurnCard));
+  // Only combos whose pieces are all still in the deck count (that matters when a swap is being
+  // tried out before it's made).
+  const have = new Set(cards.map((c) => frontFace(c.name).toLowerCase()));
   const combos = comboInfo.status === "ok"
-    ? comboInfo.combos.filter((c) => c.cards.length === 2 && COMBO_TAG_LABEL[c.bracketTag])
+    ? comboInfo.combos.filter(
+        (c) => c.cards.length === 2 && COMBO_TAG_LABEL[c.bracketTag] && c.cards.every((n) => have.has(frontFace(n).toLowerCase()))
+      )
     : [];
   const earlyCombos = combos.filter((c) => c.bracketTag === "R");
   const comboText = (list) => list.map((c) => c.cards.join(" + ")).join("; ");
@@ -1636,6 +1742,7 @@ function updateBracket(deck) {
   clearTimeout(bracketTimer);
   const key = bracketDeckKey(deck);
   noteDeckForAdjust(deck, key);
+  noteDeckForBudget(deck, key);
   const cached = bracketComboCache.get(key);
   renderBracket(deck, cached || { status: "pending" });
   if (cached) return;
@@ -1870,12 +1977,13 @@ async function runRaise(deck, target, onProgress = () => {}) {
 }
 
 async function adjustDeckToBracket(deck, target) {
-  if (adjustBusy || !deck) return;
+  if (adjustBusy || budgetBusy || !deck) return;
   const raising = !!adjustView && target > adjustView.est.bracket;
   if (!raising && target >= 4) return;
   adjustBusy = true;
   clearAdjustResult();
   refreshAdjustControls();
+  refreshBudgetControls();
 
   const snapshot = deck.groups.map((g) => g.cards.slice());
   const progress = (text) => {
@@ -1902,6 +2010,7 @@ async function adjustDeckToBracket(deck, target) {
   adjustBusy = false;
   sliderTouched = false;
   bracketNoteEl.textContent = "";
+  refreshBudgetControls();
   if (swaps.length) {
     undoState = { deck, snapshot, key: null };
     renderDeck(deck);
@@ -1976,9 +2085,9 @@ function refreshAdjustControls() {
   const target = Number(bracketSlider.value);
   const lower = target < est.bracket;
   const higher = target > est.bracket;
-  bracketSlider.disabled = adjustBusy;
+  bracketSlider.disabled = adjustBusy || budgetBusy;
   bracketSlider.setAttribute("aria-valuetext", `Bracket ${target}, ${BRACKET_NAMES[target]}`);
-  bracketApplyBtn.disabled = adjustBusy || !(lower || higher);
+  bracketApplyBtn.disabled = adjustBusy || budgetBusy || !(lower || higher);
   bracketApplyBtn.textContent = adjustBusy ? "Adjusting…" : lower || higher ? `Adjust deck to Bracket ${target}` : "Adjust deck";
   if (adjustBusy) return;
 
@@ -2011,6 +2120,316 @@ bracketUndoBtn.addEventListener("click", () => {
   deck.groups.forEach((g, i) => g.cards.splice(0, g.cards.length, ...snapshot[i]));
   clearAdjustResult();
   sliderTouched = false;
+  showToast("Put the deck back the way it was.");
+  renderDeck(deck);
+});
+
+// ---------- Budget ----------
+//
+// A budget is in estimated CAD (Scryfall's USD prices at the day's exchange rate). Trimming to it
+// swaps the priciest cards for cheaper ones that do the same job, using the same role searches as
+// the Replacements tab plus a price ceiling, so the deck stays at 100 cards. Order of preference:
+//   1. the same card in a cheaper printing (no change to how the deck plays; the art may differ),
+//   2. a cheaper card for the same job, priciest first, but when only a little needs saving it
+//      takes the least popular card that saves enough rather than the priciest one.
+// The bracket is a floor: a swap that would drop the deck below it isn't made. Where the floor
+// needs Game Changers, a card that is one is swapped for a cheaper Game Changer instead.
+
+const PRICE_TIERS = [0.25, 0.5, 1, 2, 3, 5, 8, 12, 20, 35, 60]; // USD ceilings, so searches repeat and stay cached
+const tierAtMost = (usd) => PRICE_TIERS.reduce((best, t) => (t <= usd ? t : best), null);
+const parseBudget = (value) => {
+  const n = parseFloat(value);
+  return Number.isFinite(n) && n >= 1 ? Math.round(n * 100) / 100 : null;
+};
+const knownComboInfo = (deck) => bracketComboCache.get(bracketDeckKey(deck)) || { status: "pending" };
+
+// Trims `deck` toward `budget`, never leaving it below `floor`. Needs currentDeck to be `deck`.
+async function runBudgetAdjustment(deck, budget, floor, onProgress = () => {}) {
+  const fx = await fetchUsdToCad();
+  if (!fx) return { unavailable: true, swaps: [], budget };
+
+  const swaps = [];
+  const held = []; // cards we couldn't find a cheaper match for: { card, needGc }
+  let failed = false;
+  const priceMap = new Map();
+  const load = async (card) => priceMap.set(card.id || card.name, await resolveCardPrice(card));
+  const usdOf = (card) => {
+    const info = priceMap.get(card.id || card.name);
+    return info ? info.main.usd : 0;
+  };
+  const cadOf = (card) => unitAmount(usdOf(card), fx);
+  let total = 0;
+
+  try {
+    onProgress("Pricing the deck…");
+    await Promise.all([deck.commander, ...deck.groups.flatMap((g) => g.cards)].map(load));
+    total = cadOf(deck.commander) + deck.groups.reduce((s, g) => s + g.cards.reduce((t, c) => t + cadOf(c) * (c.qty || 1), 0), 0);
+
+    const slots = deck.groups.flatMap((group) => (group.isBasics ? [] : group.cards.map((_, index) => ({ group, index }))));
+    const cardAt = (s) => s.group.cards[s.index];
+
+    // 1. Cheaper printings of the priciest cards.
+    if (total > budget) {
+      onProgress("Looking for cheaper printings…");
+      const priciest = slots.filter((s) => cadOf(cardAt(s)) >= 2).sort((a, b) => cadOf(cardAt(b)) - cadOf(cardAt(a))).slice(0, 8);
+      const cheapestPrintings = await Promise.all(priciest.map((s) => fetchCheapestPrintingQueued(cardAt(s))));
+      for (const [i, slot] of priciest.entries()) {
+        if (total <= budget) break;
+        const card = cardAt(slot);
+        const cheapest = cheapestPrintings[i];
+        const price = cheapest && cardPrices(cheapest)[0];
+        if (!price) continue;
+        const saved = cadOf(card) - unitAmount(price.usd, fx);
+        if (saved < 1 || saved < cadOf(card) * 0.1) continue; // not worth changing the art for
+        await load(cheapest);
+        slot.group.cards[slot.index] = cheapest;
+        total -= saved;
+        swaps.push({ from: card, to: cheapest, reason: "printing", saved });
+      }
+    }
+
+    // 2. Cheaper cards for the same job.
+    const taken = new Set();
+    const done = new Set(); // each slot is tried once
+
+    // The searches for a cheaper stand-in for the card in `slot`: its own role first, then just
+    // its card type at any cost. `cap` is the USD ceiling for the replacement.
+    const swapQueries = (slot, cap, needGc) => {
+      const card = cardAt(slot);
+      const search = cap === null ? null : replacementSearch(card, { group: slot.group, index: slot.index });
+      if (!search) return [];
+      const category = cardTypeCategory(card);
+      const base = `${identityQueryFragment(deck.identity)} legal:commander -is:commander game:paper`;
+      const gcTerm = needGc ? "is:gamechanger" : "-is:gamechanger";
+      const queries = [{ query: `${search.query} ${gcTerm} usd<=${cap}`, landsOnly: !!search.landsOnly }];
+      if (!search.landsOnly && TYPE_QUERY[category]) {
+        queries.push({ query: `${base} ${TYPE_QUERY[category]} ${gcTerm} usd<=${cap} order:edhrec`, landsOnly: false });
+      }
+      return queries;
+    };
+
+    // Load the role searches for the priciest cards a few at a time up front, so the swaps
+    // below mostly find their results ready instead of waiting on one request each.
+    onProgress("Finding cheaper cards…");
+    const warm = new Set();
+    slots
+      .filter((s) => cadOf(cardAt(s)) >= 1)
+      .sort((a, b) => cadOf(cardAt(b)) - cadOf(cardAt(a)))
+      .slice(0, 16)
+      .forEach((s) => {
+        const first = swapQueries(s, tierAtMost(usdOf(cardAt(s)) * 0.5), false)[0];
+        if (first && !replacementCache.has(first.query)) warm.add(first.query);
+      });
+    const warmList = [...warm];
+    for (let i = 0; i < warmList.length; i += 5) {
+      await Promise.all(warmList.slice(i, i + 5).map((q) => searchPool(q)));
+      await sleep(60);
+    }
+
+    const swapDown = async (slot) => {
+      const card = cardAt(slot);
+      const cap = tierAtMost(usdOf(card) * 0.5);
+      if (!swapQueries(slot, cap, false).length) return {};
+
+      const info = knownComboInfo(deck);
+      const bracketWith = (replacement) => {
+        slot.group.cards[slot.index] = replacement;
+        const b = estimateBracket(deck, info).bracket;
+        slot.group.cards[slot.index] = card;
+        return b;
+      };
+      // If any plain card would take the deck below the floor, only a cheaper Game Changer will do.
+      const needGc = bracketWith({ name: "", type_line: "" }) < floor;
+
+      for (const q of swapQueries(slot, cap, needGc)) {
+        if (!replacementCache.has(q.query)) await sleep(80);
+        const pool = await searchPool(q.query);
+        const found = (pool || []).find(
+          (c) =>
+            !deckHasCard(deck, c.name) && !taken.has(c.name) && !isExtraTurnCard(c) &&
+            !MASS_LAND_DENIAL.has(frontFace(c.name).toLowerCase()) && !!c.game_changer === needGc &&
+            (!q.landsOnly || isLandRelevant(c, deck.identity)) && (!needGc || bracketWith(c) >= floor)
+        );
+        if (found) return { found, needGc };
+      }
+      return { needGc };
+    };
+
+    for (let iter = 0; iter < 80 && total > budget; iter++) {
+      const over = total - budget;
+      let candidates = slots.filter((s) => !done.has(s) && cadOf(cardAt(s)) >= 1);
+      const notAdded = candidates.filter((s) => !s.group.isAdded); // cards you added yourself go last
+      if (notAdded.length) candidates = notAdded;
+      if (!candidates.length) break;
+
+      // Only a little to save: the least popular card that saves enough. Otherwise the priciest.
+      const rank = (s) => cardAt(s).edhrec_rank ?? 1e9;
+      const enough = candidates.filter((s) => cadOf(cardAt(s)) * 0.7 >= over);
+      const pick = enough.length
+        ? enough.reduce((a, b) => (rank(b) > rank(a) ? b : a))
+        : candidates.reduce((a, b) => (cadOf(cardAt(b)) > cadOf(cardAt(a)) ? b : a));
+      done.add(pick);
+
+      onProgress(`Swapping in cheaper cards… (${swaps.length} so far)`);
+      const card = cardAt(pick);
+      const res = await swapDown(pick);
+      if (!res.found) {
+        held.push({ card, needGc: !!res.needGc, cad: cadOf(card) });
+        continue;
+      }
+      await load(res.found);
+      const saved = cadOf(card) - cadOf(res.found);
+      if (saved <= 0) continue;
+      pick.group.cards[pick.index] = res.found;
+      taken.add(res.found.name);
+      total -= saved;
+      swaps.push({ from: card, to: res.found, reason: "budget", saved });
+    }
+  } catch (err) {
+    console.error(err);
+    failed = true;
+  }
+  return { swaps, held, failed, total, budget, floor, fx, commanderCad: cadOf(deck.commander) };
+}
+
+function showBudgetResult(res, built) {
+  const box = el("budget-result");
+  if (res.unavailable) {
+    box.innerHTML = `<p class="result-warn">${escapeHtml("Couldn't load the exchange rate, so the budget wasn't applied.")}</p>`;
+    return;
+  }
+  const money = (n) => `≈ ${formatAmount(n, res.fx)}`;
+  const reached = res.total <= res.budget + 0.005;
+  const lines = [];
+  if (!res.swaps.length && reached) lines.push(`<p>Already within budget: ${money(res.total)}.</p>`);
+  else if (reached) lines.push(`<p>${built ? "Built to fit" : "Trimmed to fit"} a budget of ${money(res.budget)}: the deck comes to ${money(res.total)}.</p>`);
+  else lines.push(`<p>Couldn't reach ${money(res.budget)}. It got as low as ${money(res.total)}.</p>`);
+
+  const warn = (text) => lines.push(`<p class="result-warn">${escapeHtml(text)}</p>`);
+  if (res.failed) warn("Something went wrong partway through, so the result may be incomplete.");
+  if (!reached) {
+    if (res.commanderCad > res.budget * 0.25) warn(`The commander alone is ${money(res.commanderCad)}.`);
+    const names = (list) => list.slice(0, 5).map((h) => h.card.name).join(", ");
+    const kept = res.held.filter((h) => h.needGc);
+    const noMatch = res.held.filter((h) => !h.needGc);
+    if (kept.length) warn(`${plural(kept.length, ["Game Changer", "Game Changers"])} kept to hold Bracket ${res.floor}: ${names(kept)}.`);
+    if (noMatch.length) warn(`No cheaper match was found for ${names(noMatch)}.`);
+    if (!res.held.length) warn("What's left is mostly inexpensive cards, so going lower would mean cutting real staples.");
+  }
+  if (res.swaps.length) {
+    const items = res.swaps
+      .map((s) => {
+        const how = s.reason === "printing" ? "cheaper printing, " : "";
+        return `<li>${escapeHtml(s.from.name)} → ${escapeHtml(s.to.name)} <small>(${how}saves ${money(s.saved)})</small></li>`;
+      })
+      .join("");
+    lines.push(`<details><summary>See what changed</summary><ul>${items}</ul></details>`);
+  }
+  box.innerHTML = lines.join("");
+}
+
+const budgetInput = el("budget-input");
+const budgetSlider = el("budget-slider");
+const budgetApplyBtn = el("budget-apply");
+const budgetUndoBtn = el("budget-undo");
+const budgetNoteEl = el("budget-note");
+let budgetBusy = false;
+let budgetUndoState = null; // { deck, snapshot, key } while the last budget change can be undone
+let budgetDeck = null; // the deck the controls are about; a new deck starts with no budget
+
+function clearBudgetResult() {
+  budgetUndoState = null;
+  el("budget-result").replaceChildren();
+  budgetUndoBtn.classList.add("hidden");
+}
+
+// Called on every deck render, like noteDeckForAdjust.
+function noteDeckForBudget(deck, key) {
+  if (deck !== budgetDeck) {
+    budgetDeck = deck;
+    budgetInput.value = "";
+    clearBudgetResult();
+  } else if (budgetUndoState && budgetUndoState.key && budgetUndoState.key !== key) {
+    clearBudgetResult();
+  }
+}
+
+function refreshBudgetControls() {
+  if (!currentDeck) return;
+  el("budget-panel").classList.remove("hidden");
+  const busy = budgetBusy || adjustBusy;
+  budgetInput.disabled = busy;
+  budgetSlider.disabled = busy;
+  budgetApplyBtn.textContent = budgetBusy ? "Adjusting…" : "Adjust to budget";
+  budgetApplyBtn.disabled = true;
+  if (busy) return;
+  if (!deckTotal || deckTotal.deck !== currentDeck) {
+    budgetNoteEl.textContent = "Pricing the deck…";
+    return;
+  }
+  const { total, fx } = deckTotal;
+  if (!fx) {
+    budgetNoteEl.textContent = "The exchange rate isn't available right now, so a budget can't be applied.";
+    return;
+  }
+  const max = Math.max(100, Math.ceil(total / 50) * 50);
+  const budget = parseBudget(budgetInput.value);
+  budgetSlider.max = String(max);
+  budgetSlider.value = String(budget ? Math.min(max, Math.max(25, budget)) : max);
+  el("budget-tick-max").textContent = `$${max.toLocaleString("en-CA")}`;
+
+  const money = (n) => `≈ ${formatAmount(n, fx)}`;
+  const floor = adjustView ? adjustView.est.bracket : 2;
+  if (!budget) {
+    budgetNoteEl.textContent = `The deck comes to ${money(total)}. Type a budget or drag the slider to trim it.`;
+  } else if (budget >= total) {
+    budgetNoteEl.textContent = `Within budget: ${money(total)} of ${money(budget)}.`;
+  } else {
+    budgetApplyBtn.disabled = false;
+    budgetNoteEl.textContent = `Over by ${money(total - budget)}. Adjusting swaps the priciest cards for cheaper ones in the same role, and never takes the deck below Bracket ${floor}.`;
+  }
+}
+
+async function adjustDeckToBudget(deck, budget) {
+  if (adjustBusy || budgetBusy || !deck) return;
+  budgetBusy = true;
+  clearBudgetResult();
+  refreshBudgetControls();
+  refreshAdjustControls();
+
+  const snapshot = deck.groups.map((g) => g.cards.slice());
+  const floor = adjustView ? adjustView.est.bracket : 2;
+  const res = await runBudgetAdjustment(deck, budget, floor, (text) => {
+    budgetNoteEl.textContent = text;
+  });
+
+  budgetBusy = false;
+  if (res.swaps.length) {
+    budgetUndoState = { deck, snapshot, key: null };
+    renderDeck(deck);
+    budgetUndoState.key = bracketDeckKey(deck);
+    budgetUndoBtn.classList.remove("hidden");
+  } else {
+    refreshBudgetControls();
+  }
+  refreshAdjustControls();
+  showBudgetResult(res, false);
+}
+
+budgetSlider.addEventListener("input", () => {
+  budgetInput.value = budgetSlider.value;
+  refreshBudgetControls();
+});
+budgetInput.addEventListener("input", refreshBudgetControls);
+budgetApplyBtn.addEventListener("click", () => {
+  const budget = parseBudget(budgetInput.value);
+  if (budget) adjustDeckToBudget(currentDeck, budget);
+});
+budgetUndoBtn.addEventListener("click", () => {
+  if (!budgetUndoState || budgetUndoState.deck !== currentDeck || budgetBusy || adjustBusy) return;
+  const { deck, snapshot } = budgetUndoState;
+  deck.groups.forEach((g, i) => g.cards.splice(0, g.cards.length, ...snapshot[i]));
+  clearBudgetResult();
   showToast("Put the deck back the way it was.");
   renderDeck(deck);
 });

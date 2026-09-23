@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Commander Deck Builder</title>
 <link rel="stylesheet" href="styles.css" />
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#0f1216" />
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
 </head>
 <body>
   <header class="topbar">
@@ -158,5 +162,11 @@
   </div>
 
 <script src="app.js"></script>
+<script>
+  // Register the service worker that makes this installable as an app (see sw.js).
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+  }
+</script>
 </body>
 </html>

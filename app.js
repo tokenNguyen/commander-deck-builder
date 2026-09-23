@@ -2069,9 +2069,11 @@ bracketUndoBtn.addEventListener("click", () => {
 
 // ---------- Budget ----------
 //
-// A budget is in estimated CAD (Scryfall's USD prices at the day's exchange rate). Trimming to it
-// swaps the priciest cards for cheaper ones that do the same job, using the same role searches as
-// the Replacements tab plus a price ceiling, so the deck stays at 100 cards. Order of preference:
+// A budget is in estimated CAD (Scryfall's USD prices at the day's exchange rate). Dragging the
+// slider (or typing a number) below the deck's current total trims it; above the total, it spends
+// the difference bringing in better cards (see runBudgetRaise). Trimming swaps the priciest cards
+// for cheaper ones that do the same job, using the same role searches as the Replacements tab plus
+// a price ceiling, so the deck stays at 100 cards. Order of preference:
 //   1. the same card in a cheaper printing (no change to how the deck plays; the art may differ),
 //   2. a cheaper card for the same job, priciest first, but when only a little needs saving it
 //      takes the least popular card that saves enough rather than the priciest one.
@@ -2232,7 +2234,106 @@ async function runBudgetAdjustment(deck, budget, floor, onProgress = () => {}) {
     console.error(err);
     failed = true;
   }
-  return { swaps, held, failed, total, budget, floor, fx, commanderCad: cadOf(deck.commander) };
+  return { swaps, held, failed, total, budget, floor, fx, commanderCad: cadOf(deck.commander), kind: "trim" };
+}
+
+// Spends whatever's left of the budget on more popular (and pricier) versions of what's already
+// there: the same role searches as the trim above, but hunting for a card that costs more and
+// still fits, starting from the least popular card in the deck each time — the one with the most
+// obvious room to trade up. It never brings in a Game Changer, mass land denial or an extra-turn
+// spell (the target bracket already controls those, and spending more shouldn't change the
+// bracket on its own), and it leaves cards you added yourself and the basics alone. Best-effort,
+// like the trim: a card with no better match in its price range just stays put. Needs currentDeck
+// to be `deck` (replacementSearch reads it).
+async function runBudgetRaise(deck, budget, floor, onProgress = () => {}) {
+  const fx = await fetchUsdToCad();
+  if (!fx) return { unavailable: true, swaps: [], budget };
+
+  const swaps = [];
+  let failed = false;
+  const priceMap = new Map();
+  const load = async (card) => priceMap.set(card.id || card.name, await resolveCardPrice(card));
+  const usdOf = (card) => {
+    const info = priceMap.get(card.id || card.name);
+    return info ? info.main.usd : 0;
+  };
+  const cadOf = (card) => unitAmount(usdOf(card), fx);
+  let total = 0;
+  let startTotal = 0;
+
+  try {
+    onProgress("Pricing the deck…");
+    await Promise.all([deck.commander, ...deck.groups.flatMap((g) => g.cards)].map(load));
+    total = cadOf(deck.commander) + deck.groups.reduce((s, g) => s + g.cards.reduce((t, c) => t + cadOf(c) * (c.qty || 1), 0), 0);
+    startTotal = total;
+
+    const slots = deck.groups.flatMap((group) =>
+      group.isBasics || group.isAdded ? [] : group.cards.map((_, index) => ({ group, index }))
+    );
+    const cardAt = (s) => s.group.cards[s.index];
+    const taken = new Set();
+    const done = new Set(); // each slot is tried once
+
+    // The searches for a stronger stand-in for the card in `slot`: its own role first, then just
+    // its card type. `cap` is the USD ceiling, so a search stays inside what's left to spend.
+    const raiseQueries = (slot, cap) => {
+      const card = cardAt(slot);
+      const search = replacementSearch(card, { group: slot.group, index: slot.index });
+      if (!search) return [];
+      const category = cardTypeCategory(card);
+      const base = `${identityQueryFragment(deck.identity)} legal:commander -is:commander game:paper`;
+      const queries = [{ query: `${search.query} -is:gamechanger usd<=${cap}`, landsOnly: !!search.landsOnly }];
+      if (!search.landsOnly && TYPE_QUERY[category]) {
+        queries.push({ query: `${base} ${TYPE_QUERY[category]} -is:gamechanger usd<=${cap} order:edhrec`, landsOnly: false });
+      }
+      return queries;
+    };
+
+    onProgress("Finding better cards…");
+    for (let iter = 0; iter < 60 && budget - total > 0.5; iter++) {
+      const candidates = slots.filter((s) => !done.has(s));
+      if (!candidates.length) break;
+      // Least popular card first — the one with the most obvious room to trade up.
+      const rank = (s) => cardAt(s).edhrec_rank ?? 1e9;
+      const pick = candidates.reduce((a, b) => (rank(b) > rank(a) ? b : a));
+      done.add(pick);
+
+      const card = cardAt(pick);
+      const roomUsd = (budget - total) / fx.rate;
+      // Don't let one card eat the whole remaining budget — cap the jump so several cards can
+      // improve, not just one.
+      const cap = tierAtMost(Math.min(roomUsd, usdOf(card) * 4 + 10));
+      if (cap === null || cap <= usdOf(card)) continue;
+
+      onProgress(`Finding better cards… (${swaps.length} so far)`);
+      let found = null;
+      for (const q of raiseQueries(pick, cap)) {
+        if (!replacementCache.has(q.query)) await sleep(60);
+        const pool = await searchPool(q.query);
+        found = (pool || []).find((c) => {
+          if (deckHasCard(deck, c.name) || taken.has(c.name)) return false;
+          if (c.game_changer || isExtraTurnCard(c) || MASS_LAND_DENIAL.has(frontFace(c.name).toLowerCase())) return false;
+          if (q.landsOnly && !isLandRelevant(c, deck.identity)) return false;
+          const price = cardPrices(c)[0];
+          return price && price.usd > usdOf(card) + 0.01; // a real upgrade, not a sideways move
+        });
+        if (found) break;
+      }
+      if (!found) continue;
+
+      await load(found);
+      const cost = cadOf(found) - cadOf(card);
+      if (cost <= 0 || total + cost > budget + 0.005) continue;
+      pick.group.cards[pick.index] = found;
+      taken.add(found.name);
+      total += cost;
+      swaps.push({ from: card, to: found, reason: "upgrade", cost });
+    }
+  } catch (err) {
+    console.error(err);
+    failed = true;
+  }
+  return { swaps, held: [], failed, total, startTotal, budget, floor, fx, kind: "raise" };
 }
 
 function showBudgetResult(res, built) {
@@ -2242,26 +2343,41 @@ function showBudgetResult(res, built) {
     return;
   }
   const money = (n) => `≈ ${formatAmount(n, res.fx)}`;
-  const reached = res.total <= res.budget + 0.005;
   const lines = [];
-  if (!res.swaps.length && reached) lines.push(`<p>Already within budget: ${money(res.total)}.</p>`);
-  else if (reached) lines.push(`<p>${built ? "Built to fit" : "Trimmed to fit"} a budget of ${money(res.budget)}: the deck comes to ${money(res.total)}.</p>`);
-  else lines.push(`<p>Couldn't reach ${money(res.budget)}. It got as low as ${money(res.total)}.</p>`);
-
   const warn = (text) => lines.push(`<p class="result-warn">${escapeHtml(text)}</p>`);
-  if (res.failed) warn("Something went wrong partway through, so the result may be incomplete.");
-  if (!reached) {
-    if (res.commanderCad > res.budget * 0.25) warn(`The commander alone is ${money(res.commanderCad)}.`);
-    const names = (list) => list.slice(0, 5).map((h) => h.card.name).join(", ");
-    const kept = res.held.filter((h) => h.needGc);
-    const noMatch = res.held.filter((h) => !h.needGc);
-    if (kept.length) warn(`${plural(kept.length, ["Game Changer", "Game Changers"])} kept to hold Bracket ${res.floor}: ${names(kept)}.`);
-    if (noMatch.length) warn(`No cheaper match was found for ${names(noMatch)}.`);
-    if (!res.held.length) warn("What's left is mostly inexpensive cards, so going lower would mean cutting real staples.");
+
+  if (res.kind === "raise") {
+    if (res.swaps.length) {
+      const spent = res.total - res.startTotal;
+      lines.push(
+        `<p>Spent ${money(spent)} on ${plural(res.swaps.length, ["a more popular card", "more popular cards"])}: the deck now comes to ${money(res.total)}.</p>`
+      );
+    } else {
+      lines.push(`<p>Nothing changed — no more popular card was found in reach of the budget.</p>`);
+    }
+    if (res.failed) warn("Something went wrong partway through, so the result may be incomplete.");
+  } else {
+    const reached = res.total <= res.budget + 0.005;
+    if (!res.swaps.length && reached) lines.push(`<p>Already within budget: ${money(res.total)}.</p>`);
+    else if (reached) lines.push(`<p>${built ? "Built to fit" : "Trimmed to fit"} a budget of ${money(res.budget)}: the deck comes to ${money(res.total)}.</p>`);
+    else lines.push(`<p>Couldn't reach ${money(res.budget)}. It got as low as ${money(res.total)}.</p>`);
+
+    if (res.failed) warn("Something went wrong partway through, so the result may be incomplete.");
+    if (!reached) {
+      if (res.commanderCad > res.budget * 0.25) warn(`The commander alone is ${money(res.commanderCad)}.`);
+      const names = (list) => list.slice(0, 5).map((h) => h.card.name).join(", ");
+      const kept = res.held.filter((h) => h.needGc);
+      const noMatch = res.held.filter((h) => !h.needGc);
+      if (kept.length) warn(`${plural(kept.length, ["Game Changer", "Game Changers"])} kept to hold Bracket ${res.floor}: ${names(kept)}.`);
+      if (noMatch.length) warn(`No cheaper match was found for ${names(noMatch)}.`);
+      if (!res.held.length) warn("What's left is mostly inexpensive cards, so going lower would mean cutting real staples.");
+    }
   }
+
   if (res.swaps.length) {
     const items = res.swaps
       .map((s) => {
+        if (s.reason === "upgrade") return `<li>${escapeHtml(s.from.name)} → ${escapeHtml(s.to.name)} <small>(${money(s.cost)} more)</small></li>`;
         const how = s.reason === "printing" ? "cheaper printing, " : "";
         return `<li>${escapeHtml(s.from.name)} → ${escapeHtml(s.to.name)} <small>(${how}saves ${money(s.saved)})</small></li>`;
       })
@@ -2315,26 +2431,36 @@ function refreshBudgetControls() {
     budgetNoteEl.textContent = "The exchange rate isn't available right now, so a budget can't be applied.";
     return;
   }
-  const max = Math.max(100, Math.ceil(total / 50) * 50);
+  // The slider needs to reach above the deck's current total too, or there's nothing to drag it
+  // up to — give it at least as much headroom above the total as half the total itself (and at
+  // least $200), so raising it is actually possible, not just trimming.
+  const headroom = Math.max(200, total * 0.5);
+  const max = Math.max(100, Math.ceil((total + headroom) / 50) * 50);
   const budget = parseBudget(budgetInput.value);
   budgetSlider.max = String(max);
-  budgetSlider.value = String(budget ? Math.min(max, Math.max(25, budget)) : max);
+  budgetSlider.value = String(budget ? Math.min(max, Math.max(25, budget)) : Math.ceil(total / 50) * 50);
   el("budget-tick-max").textContent = `$${max.toLocaleString("en-CA")}`;
 
   const money = (n) => `≈ ${formatAmount(n, fx)}`;
   const floor = adjustView ? adjustView.est.bracket : 2;
+  const diff = budget ? budget - total : 0; // positive: room to spend; negative: over
   if (!budget) {
     budgetNoteEl.textContent = `The deck comes to ${money(total)}. Type a budget or drag the slider to trim it.`;
-  } else if (budget >= total) {
-    budgetNoteEl.textContent = `Within budget: ${money(total)} of ${money(budget)}.`;
-  } else {
+  } else if (diff < -0.005) {
     budgetApplyBtn.disabled = false;
-    budgetNoteEl.textContent = `Over by ${money(total - budget)}. Adjusting swaps the priciest cards for cheaper ones in the same role, and never takes the deck below Bracket ${floor}.`;
+    budgetNoteEl.textContent = `Over by ${money(-diff)}. Adjusting swaps the priciest cards for cheaper ones in the same role, and never takes the deck below Bracket ${floor}.`;
+  } else if (diff > 1) {
+    budgetApplyBtn.disabled = false;
+    budgetNoteEl.textContent = `${money(diff)} to spare. Adjusting looks for more popular cards in the same roles that cost more, up to your budget.`;
+  } else {
+    budgetNoteEl.textContent = `Right at budget: ${money(total)} of ${money(budget)}.`;
   }
 }
 
 async function adjustDeckToBudget(deck, budget) {
   if (adjustBusy || budgetBusy || !deck) return;
+  const currentTotal = deckTotal && deckTotal.deck === deck ? deckTotal.total : null;
+  const raising = currentTotal !== null && budget > currentTotal + 0.005;
   budgetBusy = true;
   clearBudgetResult();
   refreshBudgetControls();
@@ -2342,9 +2468,10 @@ async function adjustDeckToBudget(deck, budget) {
 
   const snapshot = deck.groups.map((g) => g.cards.slice());
   const floor = adjustView ? adjustView.est.bracket : 2;
-  const res = await runBudgetAdjustment(deck, budget, floor, (text) => {
+  const progress = (text) => {
     budgetNoteEl.textContent = text;
-  });
+  };
+  const res = raising ? await runBudgetRaise(deck, budget, floor, progress) : await runBudgetAdjustment(deck, budget, floor, progress);
 
   budgetBusy = false;
   if (res.swaps.length) {

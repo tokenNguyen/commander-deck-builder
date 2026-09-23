@@ -63,14 +63,21 @@ the [Scryfall API](https://scryfall.com/docs/api). One small serverless function
    into the group that matches its job (Ramp, Removal, Card Draw, ...) in place of that
    group's least popular card; ones with no matching group replace the least popular
    "Creatures & Other Spells" card. Cards you added and the basic lands are left alone.
-9. **Budget.** Give a budget in estimated CAD and the deck is trimmed to fit it, either at
-   build time (the **Budget** box next to the target bracket) or on an existing deck (the
-   **Budget** panel above the mana curve: type a number or drag the slider, then **Adjust to
-   budget**). The trim is best-effort and goes in this order:
+9. **Budget.** Give a budget in estimated CAD and the deck is fit to it, either at build time
+   (the **Budget** box next to the target bracket) or on an existing deck (the **Budget**
+   panel above the mana curve: type a number or drag the slider, then **Adjust to budget**).
+   Below the deck's current total, it trims; above it, it spends the difference on stronger
+   cards. Both are best-effort. Trimming goes in this order:
    - the same card in a cheaper printing (the play doesn't change, the art may),
    - a cheaper card for the same job from the same role searches the Replacements tab uses,
      with a price ceiling. When only a little needs saving it swaps the least popular card
      that saves enough; otherwise the priciest card first. Cards you added go last.
+
+   Spending upward looks for a more popular (and pricier) card for the same job, starting
+   from the least popular card in the deck each time, and never brings in a Game Changer,
+   mass land denial, or an extra-turn spell — raising the budget shouldn't change the
+   bracket on its own. The slider's range reaches well above the deck's current total, so
+   there's always room to ask for something better, not just to trim.
 
    When you build with a budget, each pick also has a per-card price ceiling so the
    next-best card takes the slot. **The bracket is a floor:** a swap that would drop the deck
